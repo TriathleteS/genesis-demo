@@ -1,0 +1,122 @@
+## Visual Studio 向けの標準的な除外設定
+
+# Visual Studio のユーザー個人・PC 固有のキャッシュ
+.vs/
+
+# ユーザー固有のファイル
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# ビルド成果物
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# テスト結果
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+TestResults/
+
+# NuGet パッケージ
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# コードカバレッジ・プロファイラ
+*.coverage
+*.coveragexml
+*.vspx
+*.sap
+*.psess
+*.vsp
+
+# ReSharper / JetBrains Rider
+_ReSharper*/
+*.DotSettings.user
+.idea/
+
+# Visual Studio Code（個人設定）
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# 一時ファイル・バックアップ
+*.tmp
+*.tmp_proj
+*.log
+*.bak
+*.cache
+~$*
+*~
+
+# OS が作るファイル
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+
+## Python 向けの除外設定
+
+# バイトコード・キャッシュ
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 仮想環境
+.venv/
+venv/
+env/
+ENV/
+
+# パッケージング・ビルド成果物
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+wheels/
+
+# テスト・型チェック・リンターのキャッシュ
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# 環境変数ファイル（API キーなどを含むことが多いため）
+.env
+.env.*
+!.env.example
+
+# Visual Studio の Python ツール
+*.pyproj.user
