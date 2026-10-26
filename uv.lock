@@ -387,12 +387,14 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "genesis-world" },
+    { name = "numpy" },
     { name = "torch" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "genesis-world", specifier = ">=1.4.5" },
+    { name = "numpy", specifier = ">=2.5.4" },
     { name = "torch", specifier = ">=2.14.1", index = "https://download.pytorch.org/whl/cu130" },
 ]
 
