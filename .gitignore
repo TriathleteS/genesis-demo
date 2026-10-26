@@ -120,3 +120,9 @@ htmlcov/
 
 # Visual Studio の Python ツール
 *.pyproj.user
+
+
+## genesis-demo 固有の除外設定
+
+# 強化学習の学習結果（チェックポイントと TensorBoard のログ）
+logs/
