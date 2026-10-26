@@ -1,0 +1,17 @@
+[project]
+name = "genesis-demo"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "genesis-world>=1.4.5",
+    "torch>=2.14.1",
+]
+
+# PyTorch は CUDA 13.0 対応版を PyTorch 公式の配布元から取得する
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
