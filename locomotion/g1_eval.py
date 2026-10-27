@@ -12,10 +12,14 @@
     ← / → : 旋回の速度を 0.1 rad/s ずつ変える（← が左旋回）
     , / . : 左右の速度を 0.1 m/s ずつ変える（, が左）
     Space : 停止（全ての指令を 0 にする）
+
+旋回の指令が 0 のあいだは、歩き始めた向き（または最後に旋回し終えた向き）を保つよう、
+旋回速度の指令を自動で補正する（--no-heading-hold で無効化）。
 """
 
 import argparse
 import glob
+import math
 import os
 import pickle
 import re
@@ -43,6 +47,7 @@ def main():
     parser.add_argument("--vx", type=float, default=0.5, help="最初の前後速度の指令 [m/s]")
     parser.add_argument("--vy", type=float, default=0.0, help="最初の左右速度の指令 [m/s]")
     parser.add_argument("--wz", type=float, default=0.0, help="最初の旋回速度の指令 [rad/s]")
+    parser.add_argument("--no-heading-hold", action="store_true", help="向きを保つ自動補正を無効にする")
     parser.add_argument("--no-viewer", action="store_true", help="ビューアーなしで --duration 秒だけ動かし、結果を表示する")
     parser.add_argument("--duration", type=float, default=10.0, help="--no-viewer のときに動かす時間 [s]")
     args = parser.parse_args()
@@ -105,6 +110,20 @@ def main():
 
     apply_command()
 
+    # 方策は「旋回速度」の指令に従うだけで、向きそのものは見ていない。そのため旋回速度 0 の指令でも
+    # わずかな誤差が積み重なって少しずつ曲がっていく。旋回の指令が 0 のあいだは、目標の向きとのずれに
+    # 比例した旋回速度を指令して、まっすぐ歩かせる（Unitree の学習コードの heading_command と同じ考え方）
+    heading = {"target": None}
+
+    def effective_wz():
+        yaw = float(env.base_euler[0, 2])
+        if args.no_heading_hold or cmd["wz"] != 0.0 or heading["target"] is None:
+            heading["target"] = yaw  # 旋回中は、今向いている方向を次の目標にする
+            return cmd["wz"]
+        error = (heading["target"] - yaw + math.pi) % (2 * math.pi) - math.pi  # -π〜π に収める
+        lo, hi = limits["wz"]
+        return min(max(1.0 * error, lo), hi)
+
     if not args.no_viewer:
         env.scene.viewer.follow_entity(env.robot, smoothing=0.9)
         env.scene.viewer.register_keybinds(
@@ -124,6 +143,7 @@ def main():
     try:
         with torch.no_grad():
             while n_steps is None or step < n_steps:
+                env.set_command(cmd["vx"], cmd["vy"], effective_wz())
                 actions = policy(obs_dict)
                 obs_dict, rews, dones, infos = env.step(actions)
                 n_falls += int(dones[0]) - int(infos["time_outs"][0])
@@ -133,7 +153,12 @@ def main():
         pass
 
     pos = env.robot.get_pos()[0].tolist()
-    print(f"再生を終了しました。最終位置 x={pos[0]:+.2f} m, y={pos[1]:+.2f} m, 高さ={pos[2]:.2f} m, 転倒回数 {n_falls} 回")
+    elapsed = step * env.dt
+    speed = math.hypot(pos[0], pos[1]) / elapsed if elapsed > 0 else 0.0
+    print(
+        f"再生を終了しました。{elapsed:.1f} 秒間、最終位置 x={pos[0]:+.2f} m, y={pos[1]:+.2f} m, 高さ={pos[2]:.2f} m, "
+        f"向き {math.degrees(float(env.base_euler[0, 2])):+.0f} 度, 平均速度 {speed:.2f} m/s, 転倒回数 {n_falls} 回"
+    )
 
 
 if __name__ == "__main__":
