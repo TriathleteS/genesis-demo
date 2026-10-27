@@ -1,8 +1,11 @@
 """学習済みの G1 歩行方策をビューアーで再生するスクリプト。キーボードで速度指令を変えられる。
 
 実行方法（genesis-demo フォルダで）:
-    uv run python locomotion/g1_eval.py --ckpt 1000              # logs/g1-walking/model_1000.pt を再生
-    uv run python locomotion/g1_eval.py --ckpt 1000 --vx 0.8     # 最初の指令を前進 0.8 m/s にする
+    uv run python locomotion/g1_eval.py                 # logs/g1-walking/ の最新のチェックポイントを再生
+    uv run python locomotion/g1_eval.py --ckpt 500      # logs/g1-walking/model_500.pt を再生
+    uv run python locomotion/g1_eval.py --vx 0.8        # 最初の指令を前進 0.8 m/s にする
+
+1000 イテレーション学習した場合、最後のチェックポイントは model_999.pt（0 から数えるため）。
 
 ビューアー上のキー操作:
     ↑ / ↓ : 前進・後退の速度を 0.1 m/s ずつ変える
@@ -12,8 +15,10 @@
 """
 
 import argparse
+import glob
 import os
 import pickle
+import re
 from importlib import metadata
 
 import torch
@@ -34,7 +39,7 @@ from g1_env import G1Env
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp-name", type=str, default="g1-walking", help="実験名（logs/ の下のフォルダ名）")
-    parser.add_argument("--ckpt", type=int, default=1000, help="読み込むチェックポイントのイテレーション")
+    parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--vx", type=float, default=0.5, help="最初の前後速度の指令 [m/s]")
     parser.add_argument("--vy", type=float, default=0.0, help="最初の左右速度の指令 [m/s]")
     parser.add_argument("--wz", type=float, default=0.0, help="最初の旋回速度の指令 [rad/s]")
@@ -62,6 +67,15 @@ def main():
         show_viewer=not args.no_viewer,
     )
     env.max_episode_length = 10**9  # 学習時の 20 秒の時間切れで初期位置に戻らないようにする
+
+    if args.ckpt is None:
+        # model_<番号>.pt のうち、番号が最大のものを選ぶ
+        ckpts = [int(m.group(1)) for p in glob.glob(os.path.join(log_dir, "model_*.pt"))
+                 if (m := re.search(r"model_(\d+)\.pt$", p))]
+        if not ckpts:
+            raise FileNotFoundError(f"{log_dir} にチェックポイント（model_*.pt）がありません。")
+        args.ckpt = max(ckpts)
+    print(f"チェックポイント model_{args.ckpt}.pt を読み込みます。")
 
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
     runner.load(os.path.join(log_dir, f"model_{args.ckpt}.pt"))

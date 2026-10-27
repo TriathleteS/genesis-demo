@@ -7,10 +7,11 @@ https://github.com/unitreerobotics/unitree_rl_gym/blob/main/legged_gym/envs/g1/g
 実行方法（genesis-demo フォルダで）:
     uv run python locomotion/g1_train.py                          # 4096 環境 × 1000 イテレーション
     uv run python locomotion/g1_train.py --max-iterations 3000    # もっと長く学習する
-    uv run python locomotion/g1_train.py --resume 1000 --max-iterations 1000
-                                                                  # model_1000.pt から続けて 1000 イテレーション学習する
+    uv run python locomotion/g1_train.py --resume 999 --max-iterations 1000
+                                                                  # model_999.pt から続けて 1000 イテレーション学習する
 
 学習結果は logs/<実験名>/ に保存される（model_<イテレーション>.pt が方策のチェックポイント）。
+イテレーションは 0 から数えるので、100 回ごとの model_0.pt, model_100.pt, ... と、最後の model_999.pt（1000 回学習した場合）が保存される。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 """
 
