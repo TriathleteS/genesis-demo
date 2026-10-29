@@ -127,5 +127,8 @@ htmlcov/
 # 強化学習の学習結果（チェックポイントと TensorBoard のログ）
 logs/
 
+# 再生を録画した動画（g1_eval.py --record の保存先）
+videos/
+
 # Serena（この PC でだけ使うコーディング支援ツール）の設定とキャッシュ
 .serena/
