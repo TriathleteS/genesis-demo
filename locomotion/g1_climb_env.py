@@ -169,6 +169,8 @@ class G1ClimbEnv:
         self.fell = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
         self.hands_touched = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)  # このエピソードで手が台に触れたか
         self.hands_first_touch = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)
+        self.hands_supported = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)  # このエピソードで「両手を台について体を支えた」か
+        self.hands_support_first = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
         self.in_contact = torch.ones((n,), dtype=gs.tc_bool, device=gs.device)  # 体のどこかが床か台に触れているか
         self.feet_lift = torch.zeros((n, 2), **f)
         self.com_pos = torch.zeros((n, 3), **f)  # 全身の重心の位置
@@ -412,6 +414,16 @@ class G1ClimbEnv:
         self.hands_first_touch = self.hands_on_box & ~self.hands_touched
         self.hands_touched |= self.hands_on_box
 
+        # 両手を台について体を支えたか（v8）：両手が台の上にあり、少なくとも片足がまだ床についている
+        # （「手をついてから足を上げる」順番を促す一度きりの報酬に使う）
+        feet_on_floor = (
+            (self.feet_pos[:, :, 2] < tc.get("foot_on_floor_height", 0.1)) & (feet_force > 5.0) & ~self.feet_on_box
+        )
+        hands_support_now = self.hands_on_box.all(dim=1) & feet_on_floor.any(dim=1)
+        self.hands_supported |= fresh_replay & hands_support_now  # 途中の姿勢から始めた直後は数えない
+        self.hands_support_first = hands_support_now & ~self.hands_supported
+        self.hands_supported |= hands_support_now
+
         # 体のどこかが床か台に触れているか（触れていない＝跳んでいる）
         self.in_contact = (torch.norm(self.contact_forces, dim=-1) > 1.0).any(dim=1)
         self.flight_steps = torch.where(self.in_contact, torch.zeros_like(self.flight_steps), self.flight_steps + 1)
@@ -573,6 +585,8 @@ class G1ClimbEnv:
             self.succeeded |= replay & (self.replay_kind[replay_idx] == 1)
         self.hands_touched.masked_fill_(m1, False)
         self.hands_first_touch.masked_fill_(m1, False)
+        self.hands_supported.masked_fill_(mask, False)
+        self.hands_support_first.masked_fill_(mask, False)
         self.in_contact.masked_fill_(mask, True)
         self.support_steps.masked_fill_(mask, 0)
         self.flight_steps.masked_fill_(mask, 0)
@@ -609,6 +623,11 @@ class G1ClimbEnv:
         # 手が初めて台の上に触れたとき（片手ごとに一度だけ。台が低いときは与えない）
         tall = (self.box_height >= self.reward_cfg["hands_touch_min_height"]).to(gs.tc_float)
         return self.hands_first_touch.to(gs.tc_float).sum(dim=1) * tall
+
+    def _reward_hands_support(self):
+        # 片足がまだ床にある間に、両手を台について体を支えたとき（1 エピソードに一度だけ。台が低いときは与えない）
+        tall = (self.box_height >= self.reward_cfg.get("hands_support_min_height", 0.6)).to(gs.tc_float)
+        return self.hands_support_first.to(gs.tc_float) * tall
 
     # --- タスク（dense：毎ステップ） ---
     def _reward_on_top(self):

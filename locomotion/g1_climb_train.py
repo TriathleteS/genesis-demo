@@ -6,8 +6,10 @@
                                                                        # 保存しておいた途中の姿勢から始めるエピソードを 3 割混ぜる
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
+    uv run python locomotion/g1_climb_train.py --init-from g1-climb-v7:2999 --max-iterations 1000 --replay locomotion/climb_start_states.pt
+                                                                       # v7 の学習済みモデルから、今の設定で 1000 イテレーション学習する（v8）
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v7。以前の版は g1-climb, g1-climb-v2〜v6）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v8。以前の版は g1-climb, g1-climb-v2〜v7）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -158,13 +160,15 @@ def get_cfgs():
     reward_cfg = {
         "soft_dof_pos_limit": 0.9,
         "max_contact_force": 400.0,  # [N] これを超える接触力にペナルティ
-        "heading_free": 0.5,  # 台の方向からこの角度 [rad]（約 30 度）までの向きの変化はペナルティなし
+        "heading_free": 1.57,  # 台の方向からこの角度 [rad]（約 90 度）までの向きの変化はペナルティなし（横向きになって脚を掛ける登り方は許す）
         "hands_touch_min_height": 0.5,  # 手が台に触れた報酬は、この高さ [m] 以上の台でだけ与える
+        "hands_support_min_height": 0.6,  # 両手で体を支えた報酬は、この高さ [m] 以上の台でだけ与える
         # 1 エピソードに一度だけ（または到達度の更新時だけ）与える報酬
         "sparse_scales": {
             "progress": 20.0,  # 最高到達度の更新量 × 20（登り切ると合計 20）
             "success": 10.0,  # 初めて台の上に立てたとき
             "hands_touch": 1.0,  # 手が初めて台の上に触れたとき（片手ごと）
+            "hands_support": 5.0,  # 片足がまだ床にある間に、両手を台についたとき（v8。1 エピソードに一度だけ）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
@@ -176,7 +180,7 @@ def get_cfgs():
             "alive": 0.5,
             "trailing_foot": 1.0,  # 片足が台の上にあるとき、もう一方の足を上げた割合
             "lean_back": -2.0,  # 後ろへののけぞり
-            "heading": 0.0,  # 無効（v6 では跳躍を失敗にしたので不要と判断）。使うときは -2.0 など：台の方向から heading_free [rad] 以上向きを変えた分の 2 乗
+            "heading": -2.0,  # 台の方向から heading_free [rad] 以上向きを変えた分の 2 乗（v6・v7 では 0。v7 で後ろ向きに登る動きが出たので v8 で戻した）
             "upright_on_top": -2.0,
             "action_rate": -0.01,
             "dof_acc": -2.5e-7,
@@ -205,7 +209,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v7", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v8", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
@@ -214,6 +218,10 @@ def main():
     parser.add_argument(
         "--replay", type=str, default=None, metavar="FILE",
         help="保存しておいた「登る途中・登った後」の姿勢（g1_climb_collect_states.py で作成）から始めるエピソードを混ぜる",
+    )
+    parser.add_argument(
+        "--init-from", type=str, default=None, metavar="EXP:ITER",
+        help="別の実験の学習済みモデルから学習を始める（例：g1-climb-v7:2999）。報酬などの設定は今回のものを使う",
     )
     parser.add_argument("--replay-prob", type=float, default=0.3, help="--replay の姿勢から始めるエピソードの割合")
     args = parser.parse_args()
@@ -255,6 +263,12 @@ def main():
         runner.load(os.path.join(log_dir, f"model_{args.resume}.pt"))
         # 補助の力のカリキュラムを、再開したイテレーションの位置から続ける
         env.common_step_counter = args.resume * train_cfg["num_steps_per_env"]
+    elif args.init_from:
+        src_exp, src_iter = args.init_from.rsplit(":", 1)
+        runner.load(os.path.join("logs", src_exp, f"model_{src_iter}.pt"), map_location=gs.device)
+        print(f"{src_exp} の model_{src_iter}.pt から学習を始めます。")
+        # 学習済みのモデルから始めるので、補助の力は最初から 0 にする
+        env.common_step_counter = curriculum_cfg["assist_anneal_steps"]
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
