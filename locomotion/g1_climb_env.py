@@ -165,6 +165,9 @@ class G1ClimbEnv:
         self.succeeded = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)  # このエピソードで登れたか
         self.just_succeeded = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
         self.fell = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
+        self.hands_touched = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)  # このエピソードで手が台に触れたか
+        self.hands_first_touch = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)
+        self.in_contact = torch.ones((n,), dtype=gs.tc_bool, device=gs.device)  # 体のどこかが床か台に触れているか
 
         # 台の高さのカリキュラム（環境ごとの段階）
         cc = curriculum_cfg
@@ -309,6 +312,7 @@ class G1ClimbEnv:
         # 評価用：リセットで消える前のタスクの状態を残しておく
         self.last_best_progress = self.best_progress.clone()
         self.last_just_succeeded = self.just_succeeded.clone()
+        self.last_on_top = self.on_top.clone()
         self._reset_idx(self.reset_buf)
         self._update_observation()
 
@@ -352,14 +356,24 @@ class G1ClimbEnv:
         self.just_succeeded = self.on_top & ~self.succeeded
         self.succeeded |= self.on_top
 
+        # 手が初めて台の上に触れたか（腕を使うことを促す一度きりの報酬に使う）
+        self.hands_first_touch = self.hands_on_box & ~self.hands_touched
+        self.hands_touched |= self.hands_on_box
+
+        # 体のどこかが床か台に触れているか（触れていない＝跳んでいる）
+        self.in_contact = (torch.norm(self.contact_forces, dim=-1) > 1.0).any(dim=1)
+
         # 転倒：台の手前で腰が低すぎる／大きく横に倒れた／前に倒れすぎた（台に覆いかぶさる）／後ろに倒れた
         over_box = self.base_pos[:, 0] > 0.0
         support = torch.where(over_box, h, torch.zeros_like(h))
         too_low = (self.base_pos[:, 2] - support) < torch.where(
             over_box, torch.full_like(h, tc["min_height_over_box"]), torch.full_like(h, tc["min_height_on_ground"])
         )
+        # 一度台の上に立った後に、台から降りてしまった（両足が台から離れ、腰が台の上面近くまで下がった）
+        left_box = self.succeeded & ~self.feet_on_box.any(dim=1) & (self.base_pos[:, 2] < h + tc.get("left_box_height", 0.4))
         self.fell = (
             too_low
+            | left_box
             | (torch.abs(self.base_euler[:, 0]) > tc["max_roll"])
             | (self.base_euler[:, 1] > tc["max_pitch_forward"])
             | (self.base_euler[:, 1] < -tc["max_pitch_back"])
@@ -474,6 +488,9 @@ class G1ClimbEnv:
             buf.masked_fill_(mask, 0.0)
         for buf in (self.succeeded, self.on_top, self.just_succeeded, self.fell):
             buf.masked_fill_(mask, False)
+        self.hands_touched.masked_fill_(m1, False)
+        self.hands_first_touch.masked_fill_(m1, False)
+        self.in_contact.masked_fill_(mask, True)
         self.feet_on_box.masked_fill_(m1, False)
         self.hands_on_box.masked_fill_(m1, False)
         self.reset_buf.masked_fill_(mask, True)
@@ -502,6 +519,11 @@ class G1ClimbEnv:
         refund = self.best_progress * self.reward_cfg["sparse_scales"]["progress"] / abs(self.reward_scales["termination"])
         return fell * (1.0 + refund)
 
+    def _reward_hands_touch(self):
+        # 手が初めて台の上に触れたとき（片手ごとに一度だけ。台が低いときは与えない）
+        tall = (self.box_height >= self.reward_cfg["hands_touch_min_height"]).to(gs.tc_float)
+        return self.hands_first_touch.to(gs.tc_float).sum(dim=1) * tall
+
     # --- タスク（dense：毎ステップ） ---
     def _reward_on_top(self):
         # 台の上に立ち続けている間
@@ -515,6 +537,14 @@ class G1ClimbEnv:
         return torch.ones((self.num_envs,), dtype=gs.tc_float, device=gs.device)
 
     # --- 動きの質（dense） ---
+    def _reward_flight(self):
+        # 体のどこも床や台に触れていない（跳んでいる）
+        return (~self.in_contact).to(gs.tc_float)
+
+    def _reward_lin_vel_z(self):
+        # 胴体の速すぎる上下動（跳び上がる・飛び降りる）を抑える
+        return torch.square(self.base_lin_vel[:, 2])
+
     def _reward_action_rate(self):
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
 
