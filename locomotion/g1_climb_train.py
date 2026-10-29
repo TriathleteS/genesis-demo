@@ -9,7 +9,7 @@
     uv run python locomotion/g1_climb_train.py --init-from g1-climb-v7:2999 --max-iterations 1000 --replay locomotion/climb_start_states.pt
                                                                        # v7 の学習済みモデルから、今の設定で 1000 イテレーション学習する（v8）
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v8。以前の版は g1-climb, g1-climb-v2〜v7）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v8b。以前の版は g1-climb, g1-climb-v2〜v8）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -200,6 +200,9 @@ def get_cfgs():
         "init_max_level": 4,  # 最初は 0.1〜0.3 m からランダムに始める
         "level_down_progress": 0.5,  # 最高到達度がこれ未満で終わったら段階を下げる
         "top_levels_resample": 5,  # 最上段を超えた環境は、上から 5 段の中で選び直す
+        # 復習（v8b）：エピソードの 2 割は、段階と関係なく 0.1〜1.0 m のランダムな高さで練習する（段階の更新には使わない）
+        # （v7 は学習の終盤に 0.8〜1.0 m の台ばかり練習し、0.1〜0.2 m の低い台に登れなくなっていた）
+        "review_prob": 0.2,
         # 補助の力：手か足が台の上に触れている間、体重 × assist_init の上向きの力を腰にかける
         "assist_init": 0.4,
         "assist_anneal_steps": 1500 * 24,  # 1500 イテレーションかけて 0 まで下げる
@@ -209,7 +212,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v8", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v8b", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
@@ -230,6 +233,10 @@ def main():
     if args.resume is None:
         env_cfg, obs_cfg, reward_cfg, curriculum_cfg = get_cfgs()
         train_cfg = get_train_cfg(args.exp_name)
+        if args.init_from:
+            # 学習済みのモデルから始めるときは、最初の台の高さを全段階（0.1〜1.0 m）からランダムに選ぶ
+            n_levels = int(round((curriculum_cfg["height_max"] - curriculum_cfg["height_min"]) / curriculum_cfg["height_step"])) + 1
+            curriculum_cfg["init_max_level"] = n_levels - 1
         if args.replay:
             env_cfg["reset"]["replay_file"] = os.path.abspath(args.replay)
             env_cfg["reset"]["replay_prob"] = args.replay_prob
