@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v2。1 回目は g1-ladder）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -41,8 +41,9 @@ def get_train_cfg(exp_name):
             "class_name": "PPO",
             "clip_param": 0.2,
             "desired_kl": 0.01,
-            # よじ登り（v5〜v9）では 0.01 で行動のばらつきが増え続けたので、小さめにする
-            "entropy_coef": 0.003,
+            # よじ登り（v5〜v9）では 0.01 で行動のばらつきが増え続けた。はしご v1 の 0.003 では逆に
+            # 800 イテレーションで 0.39 まで下がり、試行錯誤が止まったので、その間の 0.005 にする（v2）
+            "entropy_coef": 0.005,
             "gamma": 0.99,
             "lam": 0.95,
             "learning_rate": 0.001,
@@ -102,6 +103,7 @@ def get_cfgs():
         },  # fmt: skip
         "base_link_name": "pelvis",
         "feet_link_names": ["left_ankle_roll_link", "right_ankle_roll_link"],
+        "ankle_link_names": ["left_ankle_pitch_link", "right_ankle_pitch_link"],
         "hand_link_names": ["left_wrist_roll_rubber_hand", "right_wrist_roll_rubber_hand"],
         "palm_offset": (0.08, 0.0, 0.0),  # 手のリンクの原点（手首）から手のひらの中心まで [m]（手のリンクの座標系）
         # PD 制御 [N·m/rad]（関節名の部分一致で指定）
@@ -158,6 +160,8 @@ def get_cfgs():
             "max_pitch_forward": 1.0,
             "max_pitch_back": 0.8,  # 後ろに倒れた（はしごから体が離れた）とみなす角度 [rad]
             "max_flight_steps": 5,  # 体のどこも触れず、握ってもいない状態が 0.1 秒続いたら失敗（跳躍の禁止）
+            # 足がはしごの面よりこの距離 [m] 以上向こう側に入るか、腰がはしごの面より向こう側に入ったら失敗（v2。はしごの下にもぐり込む動きの禁止）
+            "max_foot_behind": 0.05,
         },
     }
     obs_cfg = {
@@ -179,7 +183,8 @@ def get_cfgs():
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
         "dense_scales": {
             "on_target": 10.0,  # 目標の段に立ち、握り続けている間
-            "alive": 0.5,
+            "alive": 0.2,  # v1 の 0.5 では、転ばずにじっとしているだけで得をしたので下げる（v2）
+            "body_contact": -5.0,  # 手足以外がはしごや床を押す力（体重比）。v1 では胸を緩やかなはしごにもたれかけて休んでいた（v2）
             "grip_strain": -0.5,  # 握力の限界に近い力で引きつけている（腕だけでぶら下がる動きを抑える）
             "flight": -5.0,
             "lin_vel_z": -1.0,
@@ -209,7 +214,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v2", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
