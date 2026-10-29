@@ -660,6 +660,10 @@ class G1ClimbEnv:
         yaw = self.base_euler[:, 2]
         return torch.square((torch.abs(yaw) - self.reward_cfg.get("heading_free", 0.5)).clamp(min=0.0))
 
+    def _reward_yaw_rate(self):
+        # 体の向きを変える速さ（鉛直軸まわりの角速度 [rad/s]）の 2 乗（v9。軸足のまわりをくるっと回って登る動きを抑える）
+        return torch.square(self.robot.get_ang()[:, 2])
+
     def _reward_lean_back(self):
         # 後ろに大きくのけぞる姿勢（片足を台にかけたまま体を後ろに倒して踏ん張る）を抑える
         return torch.square((-self.base_euler[:, 1] - 0.2).clamp(min=0.0))
