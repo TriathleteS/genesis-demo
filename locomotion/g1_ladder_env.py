@@ -1,0 +1,660 @@
+"""ヒューマノイド Unitree G1（23 関節）が、傾いたはしごを手と足を使って登る強化学習の環境。
+
+台へのよじ登り（g1_climb_env.py）との主な違い:
+  - はしご：横棒（段）を等間隔に並べたもの。傾き（床からの角度）は環境ごとに変えられ、60°（急な階段くらい）から
+    90°（垂直）までのカリキュラムにする。垂直に近いほど、手で体を引きつけないと後ろに倒れるので、手が必須になる
+  - 握る動作の簡略化：手のひらが横棒のすぐ近くにあるときに「握る」指令を出すと、手のひらをその位置に
+    ばね（上限つきの力）で引きつける。G1（23 関節版）の手には指がなく横棒を握れないため、握る力を
+    ばねで表す。力に上限（既定 250 N）があるので、握力の限界も表せる。指令をやめると離す
+  - 行動：23 関節の目標角度に加えて、左右の手の「握る」指令（正なら握る）の 2 つ。合計 25
+
+座標：はしごの根元（床の位置）が原点。はしごは +x の方向に傾いて立ち、横棒は y 方向に伸びる。
+ロボットは x < 0 から +x 方向（はしごの方）を向いて始める。
+横棒 k の中心 = s_k × (cos θ, 0, sin θ)、s_k = rung_first + k × rung_spacing（はしごに沿った距離）。
+"""
+
+import math
+import os
+
+import torch
+from tensordict import TensorDict
+
+import genesis as gs
+from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, xyz_to_quat
+
+DEFAULT_URDF = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "assets", "unitree_g1", "g1_23dof_rev_1_0.urdf"
+)
+
+
+def gs_rand(lower, upper, batch_shape):
+    lower = torch.as_tensor(lower, dtype=gs.tc_float, device=gs.device)
+    upper = torch.as_tensor(upper, dtype=gs.tc_float, device=gs.device)
+    return (upper - lower) * torch.rand(size=(*batch_shape, *lower.shape), dtype=gs.tc_float, device=gs.device) + lower
+
+
+class G1LadderEnv:
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, curriculum_cfg, show_viewer=False, camera_res=None,
+                 rail_angle_deg=None):
+        self.num_envs: int = num_envs
+        self.num_joints = len(env_cfg["joint_names"])
+        self.num_actions = self.num_joints + 2  # 関節 23 + 左右の手の「握る」指令 2
+        self.device = gs.device
+        self.dt = env_cfg["dt"]
+        self.max_episode_length = math.ceil(env_cfg["episode_length_s"] / self.dt)
+
+        self.cfg = env_cfg  # rsl_rl の OnPolicyRunner が参照する
+        self.env_cfg = env_cfg
+        self.obs_cfg = obs_cfg
+        self.reward_cfg = reward_cfg
+        self.curriculum_cfg = curriculum_cfg
+        self.obs_scales = obs_cfg["obs_scales"]
+        lc = env_cfg["ladder"]
+        self.num_rungs = lc["num_rungs"]
+        self.rung_s = torch.tensor(
+            [lc["rung_first"] + k * lc["rung_spacing"] for k in range(self.num_rungs)], dtype=gs.tc_float, device=gs.device
+        )
+
+        # ------------------------------------------------------------------
+        # シーン：床・はしごの横棒・ロボット
+        # ------------------------------------------------------------------
+        self.scene = gs.Scene(
+            sim_options=gs.options.SimOptions(dt=self.dt, substeps=env_cfg["substeps"]),
+            rigid_options=gs.options.RigidOptions(
+                enable_self_collision=env_cfg["self_collision"],
+                max_collision_pairs=env_cfg["max_collision_pairs"],
+                tolerance=1e-5,
+            ),
+            vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(-1.6, -2.6, 1.8),
+                camera_lookat=(0.0, 0.0, 1.0),
+                camera_fov=45,
+            ),
+            show_viewer=show_viewer,
+        )
+        self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+        # 横棒は 1 本ずつ別の物体にする（Genesis では、固定した物体を環境ごとに傾けられないため。
+        # 横棒は y 方向に伸びる棒なので、はしごの傾きが変わっても向きは同じで、位置だけを変えればよい）
+        t = lc["rung_thickness"]
+        self.rungs = [
+            self.scene.add_entity(
+                gs.morphs.Box(pos=(0.0, 0.0, float(self.rung_s[k])), size=(t, lc["rung_width"], t), fixed=True),
+                surface=gs.surfaces.Default(color=(0.75, 0.6, 0.35)),
+            )
+            for k in range(self.num_rungs)
+        ]
+        # 見た目だけの支柱（評価で、はしごの傾きが決まっているときだけ置く。衝突はしない）
+        if rail_angle_deg is not None:
+            th = math.radians(rail_angle_deg)
+            length = float(self.rung_s[-1]) + 0.2
+            for side in (-1, 1):
+                self.scene.add_entity(
+                    gs.morphs.Box(
+                        pos=(length / 2 * math.cos(th), side * (lc["rung_width"] / 2 + 0.02), length / 2 * math.sin(th)),
+                        size=(0.04, 0.04, length),
+                        euler=(0.0, 90.0 - rail_angle_deg, 0.0),
+                        fixed=True,
+                        collision=False,
+                    ),
+                    surface=gs.surfaces.Default(color=(0.6, 0.45, 0.25)),
+                )
+        self.robot = self.scene.add_entity(
+            gs.morphs.URDF(file=env_cfg.get("urdf_path") or DEFAULT_URDF, pos=(-0.5, 0.0, 0.8)),
+        )
+
+        self.camera = None
+        if camera_res is not None:
+            self.camera = self.scene.add_camera(
+                res=camera_res, pos=(-1.6, -2.6, 1.8), lookat=(0.0, 0.0, 1.0), fov=45, GUI=False, env_idx=0
+            )
+
+        self.scene.build(n_envs=num_envs)
+
+        # ------------------------------------------------------------------
+        # 関節・リンク
+        # ------------------------------------------------------------------
+        joint_names = env_cfg["joint_names"]
+        self.motors_dof_idx = torch.tensor(
+            [self.robot.get_joint(name).dof_start for name in joint_names], dtype=gs.tc_int, device=gs.device
+        )
+
+        def per_joint(table):
+            values = []
+            for name in joint_names:
+                matches = [v for key, v in table.items() if key in name]
+                assert len(matches) == 1, f"{name} に対応する値が見つからない、または複数ある"
+                values.append(matches[0])
+            return values
+
+        self.robot.set_dofs_kp(per_joint(env_cfg["stiffness"]), self.motors_dof_idx)
+        self.robot.set_dofs_kv(per_joint(env_cfg["damping"]), self.motors_dof_idx)
+        self.action_scale = torch.tensor(per_joint(env_cfg["action_scale"]), dtype=gs.tc_float, device=gs.device)
+
+        lower, upper = self.robot.get_dofs_limit(self.motors_dof_idx)
+        lower, upper = lower.reshape(-1, self.num_joints)[0], upper.reshape(-1, self.num_joints)[0]
+        mid, half = (lower + upper) / 2, (upper - lower) / 2 * reward_cfg["soft_dof_pos_limit"]
+        self.soft_dof_limits = (mid - half, mid + half)
+
+        link = lambda name: self.robot.get_link(name).idx_local  # noqa: E731
+        self.feet_links_idx = [link(n) for n in env_cfg["feet_link_names"]]
+        self.hands_links_idx = [link(n) for n in env_cfg["hand_link_names"]]
+        self.base_link_idx = link(env_cfg["base_link_name"])
+        self.robot_mass = float(self.robot.get_mass())
+        self.link_masses = self.robot.get_links_mass().reshape(-1, self.robot.n_links)[0]
+
+        # ------------------------------------------------------------------
+        # バッファ
+        # ------------------------------------------------------------------
+        n, a, j = num_envs, self.num_actions, self.num_joints
+        f = dict(dtype=gs.tc_float, device=gs.device)
+        b = dict(dtype=gs.tc_bool, device=gs.device)
+        self.default_dof_pos = torch.tensor([env_cfg["default_joint_angles"][name] for name in joint_names], **f)
+        self.init_dof_pos_all = torch.tensor(
+            [env_cfg["default_joint_angles"][joint.name] for joint in self.robot.joints[1:]], **f
+        )
+        self.global_gravity = torch.tensor([0.0, 0.0, -1.0], **f)
+        self.palm_offset = torch.tensor(env_cfg["palm_offset"], **f)  # 手のリンクの原点（手首）から手のひらの中心まで
+
+        self.base_pos = torch.zeros((n, 3), **f)
+        self.base_quat = torch.zeros((n, 4), **f)
+        self.base_quat[:, 0] = 1.0
+        self.base_euler = torch.zeros((n, 3), **f)
+        self.base_lin_vel = torch.zeros((n, 3), **f)
+        self.base_ang_vel = torch.zeros((n, 3), **f)
+        self.base_vel_world = torch.zeros((n, 3), **f)
+        self.projected_gravity = torch.zeros((n, 3), **f)
+        self.projected_gravity[:, 2] = -1.0
+        self.dof_pos = torch.zeros((n, j), **f)
+        self.dof_vel = torch.zeros((n, j), **f)
+        self.last_dof_vel = torch.zeros((n, j), **f)
+        self.actions = torch.zeros((n, a), **f)
+        self.last_actions = torch.zeros((n, a), **f)
+        self.contact_forces = torch.zeros((n, self.robot.n_links, 3), **f)
+        self.feet_pos = torch.zeros((n, 2, 3), **f)
+        self.palms_pos = torch.zeros((n, 2, 3), **f)
+        self.com_pos = torch.zeros((n, 3), **f)
+        self.rew_buf = torch.zeros((n,), **f)
+        self.reset_buf = torch.ones((n,), **b)
+        self.time_out_buf = torch.zeros((n,), **b)
+        self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
+
+        # はしごの状態（環境ごと）
+        self.ladder_angle = torch.full((n,), math.radians(75.0), **f)  # 床からの角度 [rad]
+        self.ladder_u = torch.zeros((n, 3), **f)  # はしごに沿った上向きの単位ベクトル
+        self.ladder_nrm = torch.zeros((n, 3), **f)  # はしごの面に垂直で、ロボットの側を向く単位ベクトル
+        self.target_height = torch.ones((n,), **f)  # 目標の段の高さ [m]
+
+        # 握る
+        self.grip = torch.zeros((n, 2), **b)  # 握っているか（左右）
+        self.grip_anchor = torch.zeros((n, 2, 3), **f)  # 握った位置（手のひらを引きつける先）
+        self.grip_rung = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 握っている段
+        self.grip_force = torch.zeros((n, 2, 3), **f)
+        self.palm_rung_dist = torch.zeros((n, 2), **f)  # 手のひらから一番近い横棒までの距離 [m]
+        self.palm_rung_idx = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)
+
+        # タスクの状態
+        self.feet_on_rung = torch.zeros((n, 2), **b)
+        self.feet_rung_idx = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # 乗っている段（乗っていなければ -1）
+        self.progress = torch.zeros((n,), **f)
+        self.best_progress = torch.zeros((n,), **f)
+        self.progress_gain = torch.zeros((n,), **f)
+        self.on_target = torch.zeros((n,), **b)  # 目標の段に両足で立ち、手で握っている
+        self.succeeded = torch.zeros((n,), **b)
+        self.just_succeeded = torch.zeros((n,), **b)
+        self.fell = torch.zeros((n,), **b)
+        self.first_grip = torch.zeros((n, 2), **b)  # 今のステップで、このエピソード初めて（高い段を）握った
+        self.gripped_once = torch.zeros((n, 2), **b)
+        self.in_contact = torch.ones((n,), **b)
+        self.support_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
+        self.flight_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
+        self.has_landed = torch.zeros((n,), **b)
+
+        # はしごの傾きのカリキュラム（環境ごとの段階）
+        cc = curriculum_cfg
+        self.num_levels = int(round((cc["angle_max"] - cc["angle_min"]) / cc["angle_step"])) + 1
+        self.levels = torch.randint(0, cc["init_max_level"] + 1, (n,), device=gs.device)
+        self.fixed_angle = None  # 評価時に傾きを固定する [deg]
+        self.angle_override = torch.full((n,), float("nan"), **f)
+        self.is_review = torch.zeros((n,), **b)
+        self.common_step_counter = 0
+        self.assist_scale = cc["assist_init"]
+        self.success_rate_ema = 0.0
+
+        # 観測ノイズ
+        noise = obs_cfg["noise_scales"]
+        level = obs_cfg["noise_level"] if obs_cfg["add_noise"] else 0.0
+        self.noise_scale_vec = torch.cat(
+            (
+                torch.full((3,), noise["ang_vel"] * self.obs_scales["ang_vel"]),
+                torch.full((3,), noise["gravity"]),
+                torch.full((j,), noise["dof_pos"] * self.obs_scales["dof_pos"]),
+                torch.full((j,), noise["dof_vel"] * self.obs_scales["dof_vel"]),
+                torch.zeros(a),  # 前回の行動
+                torch.full((self._num_ladder_obs,), noise["ladder"]),
+            )
+        ).to(**f) * level
+
+        # 報酬関数（dense は毎ステップの値に dt を掛ける。sparse はそのまま与える）
+        self.reward_scales = {}
+        self.reward_functions, self.episode_sums = {}, {}
+        for name, scale in reward_cfg["dense_scales"].items():
+            self.reward_scales[name] = scale * self.dt
+        for name, scale in reward_cfg["sparse_scales"].items():
+            self.reward_scales[name] = scale
+        for name in self.reward_scales:
+            self.reward_functions[name] = getattr(self, "_reward_" + name)
+            self.episode_sums[name] = torch.zeros((n,), **f)
+
+        self.extras = dict()
+        self.reset()
+
+    _num_ladder_obs = 18
+
+    # ----------------------------------------------------------------------
+    # はしご・カリキュラム
+    # ----------------------------------------------------------------------
+    def _update_ladder(self, envs_idx):
+        """はしごの傾きを（envs_idx の環境だけ）決め直し、横棒を並べ直す。"""
+        cc = self.curriculum_cfg
+        angle_deg = cc["angle_min"] + self.levels.to(gs.tc_float) * cc["angle_step"]
+        if self.fixed_angle is not None:
+            angle_deg = torch.full_like(angle_deg, self.fixed_angle)
+        angle_deg = torch.where(torch.isnan(self.angle_override), angle_deg, self.angle_override)
+        angle = torch.deg2rad(angle_deg)
+        if envs_idx is None:
+            self.ladder_angle.copy_(angle)
+        else:
+            torch.where(envs_idx, angle, self.ladder_angle, out=self.ladder_angle)
+        c, s = torch.cos(self.ladder_angle), torch.sin(self.ladder_angle)
+        zero = torch.zeros_like(c)
+        self.ladder_u = torch.stack((c, zero, s), dim=1)
+        self.ladder_nrm = torch.stack((-s, zero, c), dim=1)
+        k_target = self.env_cfg["task"]["target_rung"]
+        self.target_height = self.rung_s[k_target] * s
+        for k, rung in enumerate(self.rungs):
+            rung.set_pos(self.rung_s[k] * self.ladder_u)
+
+    def set_ladder_angle(self, angle_deg):
+        """評価用：はしごの傾きを固定する [deg]。"""
+        self.fixed_angle = float(angle_deg)
+        self._update_ladder(None)
+
+    def _update_curriculum(self, envs_idx):
+        cc = self.curriculum_cfg
+        up = envs_idx & self.succeeded
+        down = envs_idx & ~self.succeeded & (self.best_progress < cc["level_down_progress"])
+        self.levels += up.to(self.levels.dtype)
+        self.levels -= down.to(self.levels.dtype)
+        over = self.levels >= self.num_levels
+        random_levels = torch.randint(
+            max(0, self.num_levels - cc["top_levels_resample"]), self.num_levels, (self.num_envs,), device=gs.device
+        )
+        self.levels = torch.where(over, random_levels, self.levels).clamp(min=0)
+        n_done = envs_idx.sum()
+        rate = torch.where(n_done > 0, (envs_idx & self.succeeded).sum() / n_done.clamp(min=1), self.success_rate_ema)
+        self.success_rate_ema = 0.99 * float(self.success_rate_ema) + 0.01 * float(rate)
+
+    def _update_assist(self):
+        cc = self.curriculum_cfg
+        frac = min(self.common_step_counter / max(cc["assist_anneal_steps"], 1), 1.0)
+        self.assist_scale = cc["assist_init"] * (1.0 - frac)
+
+    def _ladder_coords(self, p):
+        """位置 p [n, m, 3] を、はしごに沿った距離 s・面からの距離 nn・一番近い横棒の番号と距離に変換する。"""
+        s = (p * self.ladder_u[:, None, :]).sum(dim=-1)
+        nn = (p * self.ladder_nrm[:, None, :]).sum(dim=-1)
+        ds = s[..., None] - self.rung_s  # [n, m, num_rungs]
+        dist = torch.sqrt(ds**2 + nn[..., None] ** 2)
+        dmin, kmin = dist.min(dim=-1)
+        ds_near = torch.gather(ds, -1, kmin[..., None])[..., 0]
+        return s, nn, kmin, dmin, ds_near
+
+    # ----------------------------------------------------------------------
+    # 1 ステップ進める
+    # ----------------------------------------------------------------------
+    def step(self, actions):
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        target_dof_pos = self.actions[:, : self.num_joints] * self.action_scale + self.default_dof_pos
+        self.robot.control_dofs_position(target_dof_pos, self.motors_dof_idx)
+
+        # 握る：手のひらを、握った位置にばねで引きつける（力の上限 = 握力の限界）
+        gc = self.env_cfg["grip"]
+        palms = self._palms()
+        palm_vel = self.robot.get_links_vel(self.hands_links_idx)
+        force = gc["stiffness"] * (self.grip_anchor - palms) - gc["damping"] * palm_vel
+        norm = torch.norm(force, dim=-1, keepdim=True)
+        force = force * torch.clamp(gc["max_force"] / norm.clamp(min=1e-6), max=1.0)
+        self.grip_force = force * self.grip[..., None].to(gs.tc_float)
+        wrench = self.grip_force
+
+        # 補助の力：はしごに手か足が掛かっている間だけ、腰を上向きに支える（学習の初期だけ）
+        self._update_assist()
+        if self.assist_scale > 0.0:
+            near = (self.grip.any(dim=1) | self.feet_on_rung.any(dim=1)) & ~self.on_target
+            assist = torch.zeros((self.num_envs, 1, 3), dtype=gs.tc_float, device=gs.device)
+            assist[:, 0, 2] = near.to(gs.tc_float) * self.assist_scale * self.robot_mass * 9.81
+            self.robot.apply_links_external_wrench(force=assist, links_idx_local=[self.base_link_idx])
+        self.robot.apply_links_external_wrench(force=wrench, links_idx_local=self.hands_links_idx)
+
+        self.scene.step()
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+
+        # 状態の更新
+        self.base_pos = self.robot.get_pos()
+        self.base_quat = self.robot.get_quat()
+        self.base_euler = quat_to_xyz(self.base_quat, rpy=True, degrees=False)
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_vel_world = self.robot.get_vel()
+        self.base_lin_vel = transform_by_quat(self.base_vel_world, inv_base_quat)
+        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
+        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
+        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
+        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
+        self.contact_forces = self.robot.get_links_net_contact_force()
+        self.feet_pos = self.robot.get_links_pos(self.feet_links_idx)
+        self.palms_pos = self._palms()
+        links_com = self.robot.get_links_pos(ref=gs.link_ref_frame.link_COM)
+        self.com_pos = (links_com * self.link_masses[None, :, None]).sum(dim=1) / self.link_masses.sum()
+        self._update_grip()
+        self._update_task_state()
+
+        # 終了判定
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf = self.time_out_buf | self.fell | self.scene.rigid_solver.get_error_envs_mask()
+
+        # 報酬
+        self.rew_buf.zero_()
+        for name, reward_func in self.reward_functions.items():
+            rew = reward_func() * self.reward_scales[name]
+            self.rew_buf += rew
+            self.episode_sums[name] += rew
+
+        self.extras["time_outs"] = self.time_out_buf.to(dtype=gs.tc_float)
+        # 評価用：リセットで消える前のタスクの状態を残しておく
+        self.last_best_progress = self.best_progress.clone()
+        self.last_just_succeeded = self.just_succeeded.clone()
+        self.last_on_target = self.on_target.clone()
+        self._reset_idx(self.reset_buf)
+        self._update_observation()
+
+        self.last_actions.copy_(self.actions)
+        self.last_dof_vel.copy_(self.dof_vel)
+        return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
+
+    def _palms(self):
+        pos = self.robot.get_links_pos(self.hands_links_idx)
+        quat = self.robot.get_links_quat(self.hands_links_idx)
+        return pos + transform_by_quat(self.palm_offset.expand(pos.shape), quat)
+
+    def _update_grip(self):
+        """握る・離すの判定。"""
+        gc = self.env_cfg["grip"]
+        lc = self.env_cfg["ladder"]
+        _, _, kmin, dmin, _ = self._ladder_coords(self.palms_pos)
+        self.palm_rung_dist, self.palm_rung_idx = dmin, kmin
+        command = self.actions[:, self.num_joints :] > 0.0
+        within = (dmin < gc["grab_distance"]) & (torch.abs(self.palms_pos[:, :, 1]) < lc["rung_width"] / 2)
+        new_grip = command & within & ~self.grip
+        # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
+        self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
+        self.grip_rung = torch.where(new_grip, kmin, self.grip_rung)
+        self.grip = self.grip | new_grip
+        # 離す：指令をやめた、または握力の限界を超えて手が大きくずれた（滑って外れた）
+        stretch = torch.norm(self.grip_anchor - self.palms_pos, dim=-1)
+        self.grip = self.grip & command & (stretch < gc["slip_distance"])
+        # 高い段を初めて握ったか（腕を使うことを促す一度きりの報酬に使う）
+        high = self.grip_anchor[:, :, 2] > self.env_cfg["task"]["first_grip_min_height"]
+        grip_high = self.grip & high
+        self.first_grip = grip_high & ~self.gripped_once
+        self.gripped_once |= grip_high
+
+    def _update_task_state(self):
+        tc = self.env_cfg["task"]
+        h = self.target_height
+
+        # 足が横棒に乗っているか：床から離れていて、横棒の近くにあり、力がかかっている
+        feet_force = torch.norm(self.contact_forces[:, self.feet_links_idx], dim=-1)
+        _, _, fk, fd, _ = self._ladder_coords(self.feet_pos)
+        self.feet_on_rung = (
+            (self.feet_pos[:, :, 2] > tc["foot_off_floor_height"]) & (fd < tc["foot_rung_distance"]) & (feet_force > 5.0)
+        )
+        self.feet_rung_idx = torch.where(self.feet_on_rung, fk, torch.full_like(fk, -1))
+
+        # 到達度（0〜1）：重心の高さ・横棒に乗った足の高さ・握った手の高さ・横棒への手の近さ
+        supported = self.grip.any(dim=1) | self.feet_on_rung.any(dim=1)
+        self.support_steps = torch.where(supported, self.support_steps + 1, torch.zeros_like(self.support_steps))
+        slow = torch.abs(self.base_vel_world[:, 2]) < tc["max_rise_speed"]
+        steady = ((self.support_steps >= tc["support_min_steps"]) & slow).to(gs.tc_float)
+        p_com = ((self.com_pos[:, 2] - tc["stand_com_height"]) / h.clamp(min=0.05)).clamp(0.0, 1.0) * steady
+        foot_h = torch.where(
+            self.feet_on_rung, self.rung_s[self.feet_rung_idx.clamp(min=0)] * torch.sin(self.ladder_angle)[:, None], 0.0
+        )
+        p_feet = (foot_h / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0).mean(dim=1)
+        grip_h = torch.where(self.grip, self.grip_anchor[:, :, 2], 0.0).max(dim=1).values
+        p_grip = (grip_h / (h + tc["grip_height_above_target"])).clamp(0.0, 1.0)
+        p_reach = (1.0 - self.palm_rung_dist.min(dim=1).values / tc["reach_distance"]).clamp(0.0, 1.0)
+        w = tc["progress_weights"]
+        self.progress = w[0] * p_reach + w[1] * p_grip + w[2] * p_com + w[3] * p_feet
+        self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
+        self.best_progress = torch.maximum(self.best_progress, self.progress)
+
+        # 目標の段に立っているか：両足が目標の段以上の横棒に乗り、少なくとも片手で握っている
+        k_target = tc["target_rung"]
+        self.on_target = (
+            self.feet_on_rung.all(dim=1) & (self.feet_rung_idx >= k_target).all(dim=1) & self.grip.any(dim=1)
+        )
+        self.just_succeeded = self.on_target & ~self.succeeded
+        self.succeeded |= self.on_target
+
+        # 体のどこかが床かはしごに触れているか、手で握っているか（どれでもない＝跳んでいる）
+        self.in_contact = (torch.norm(self.contact_forces, dim=-1) > 1.0).any(dim=1) | self.grip.any(dim=1)
+        self.flight_steps = torch.where(self.in_contact, torch.zeros_like(self.flight_steps), self.flight_steps + 1)
+        self.has_landed |= self.in_contact
+        jumped = (self.flight_steps >= tc["max_flight_steps"]) & self.has_landed
+
+        # 転倒：腰が低すぎる／大きく傾いた
+        self.fell = (
+            (self.base_pos[:, 2] < tc["min_base_height"])
+            | jumped
+            | (torch.abs(self.base_euler[:, 0]) > tc["max_roll"])
+            | (self.base_euler[:, 1] > tc["max_pitch_forward"])
+            | (self.base_euler[:, 1] < -tc["max_pitch_back"])
+        )
+
+    def get_observations(self):
+        return TensorDict({"policy": self.obs_buf, "critic": self.privileged_obs_buf}, batch_size=[self.num_envs])
+
+    def _update_observation(self):
+        yaw = self.base_euler[:, 2]
+        th = self.ladder_angle
+        base_s, base_n, _, _, _ = self._ladder_coords(self.base_pos[:, None, :])
+        _, palm_n, _, _, palm_ds = self._ladder_coords(self.palms_pos)
+        _, foot_n, _, _, foot_ds = self._ladder_coords(self.feet_pos)
+        ladder_obs = torch.cat(
+            (
+                torch.stack((torch.sin(th), torch.cos(th), torch.sin(yaw), torch.cos(yaw)), dim=1),  # 4
+                base_s, base_n,  # 2：腰の位置（はしごに沿った距離・はしごの面からの距離）
+                palm_ds, palm_n,  # 4：手のひらから一番近い横棒まで（はしごに沿った方向・面に垂直な方向）
+                foot_ds, foot_n,  # 4：足から一番近い横棒まで
+                self.grip.to(gs.tc_float),  # 2：握っているか
+                self.palms_pos[:, :, 1],  # 2：手のひらの横の位置（横棒の端から外れないように）
+            ),
+            dim=1,
+        )
+        self.obs_buf = torch.cat(
+            (
+                self.base_ang_vel * self.obs_scales["ang_vel"],  # 3
+                self.projected_gravity,  # 3
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 23
+                self.dof_vel * self.obs_scales["dof_vel"],  # 23
+                self.actions,  # 25
+                ladder_obs,  # 18
+            ),
+            dim=-1,
+        )
+        self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
+        self.privileged_obs_buf = torch.cat(
+            (
+                self.obs_buf,
+                self.base_lin_vel * self.obs_scales["lin_vel"],  # 3
+                self.base_pos[:, 2:3],  # 1
+                self.feet_on_rung.to(gs.tc_float),  # 2
+                self.best_progress[:, None],  # 1
+                torch.full((self.num_envs, 1), self.assist_scale, dtype=gs.tc_float, device=gs.device),  # 1
+            ),
+            dim=-1,
+        )
+
+    # ----------------------------------------------------------------------
+    # リセット
+    # ----------------------------------------------------------------------
+    def _reset_idx(self, envs_idx=None):
+        all_envs = envs_idx is None
+        mask = torch.ones((self.num_envs,), dtype=gs.tc_bool, device=gs.device) if all_envs else envs_idx
+
+        n_done = mask.sum()
+        self.extras["episode"] = {}
+        for key, value in self.episode_sums.items():
+            mean = torch.where(n_done > 0, value[mask].sum() / n_done.clamp(min=1), 0.0)
+            self.extras["episode"]["rew_" + key] = mean / self.env_cfg["episode_length_s"]
+            value.masked_fill_(mask, 0.0)
+
+        # カリキュラムの更新（評価時は傾きを固定する。復習のエピソードは段階の更新に使わない）
+        if not all_envs and self.fixed_angle is None:
+            self._update_curriculum(mask & ~self.is_review)
+        cc = self.curriculum_cfg
+        review = torch.zeros_like(mask)
+        override = torch.full_like(self.ladder_angle, float("nan"))
+        if self.fixed_angle is None and cc.get("review_prob", 0.0) > 0.0:
+            review = mask & (torch.rand((self.num_envs,), device=gs.device) < cc["review_prob"])
+            review_levels = torch.randint(0, self.num_levels, (self.num_envs,), device=gs.device)
+            override = torch.where(review, cc["angle_min"] + review_levels.to(gs.tc_float) * cc["angle_step"], override)
+        self.angle_override = torch.where(mask, override, self.angle_override)
+        self.is_review = torch.where(mask, review, self.is_review)
+        self._update_ladder(None if all_envs else mask)
+        angles = cc["angle_min"] + self.levels.to(gs.tc_float) * cc["angle_step"]
+        self.extras["episode"]["Curriculum/mean_angle"] = angles.mean()
+        self.extras["episode"]["Curriculum/max_angle"] = angles.max()
+        self.extras["episode"]["Curriculum/assist"] = torch.tensor(self.assist_scale)
+        self.extras["episode"]["Curriculum/success_rate"] = torch.tensor(self.success_rate_ema)
+
+        # ロボットをはしごの手前に置き直す
+        rc = self.env_cfg["reset"]
+        spawn_x = -gs_rand(*rc["distance_range"], (self.num_envs,))
+        spawn_y = gs_rand(-rc["lateral_range"], rc["lateral_range"], (self.num_envs,))
+        spawn_yaw = gs_rand(-rc["yaw_range"], rc["yaw_range"], (self.num_envs,))
+        quat = xyz_to_quat(
+            torch.stack((torch.zeros_like(spawn_yaw), torch.zeros_like(spawn_yaw), spawn_yaw), dim=1), rpy=True
+        )
+        qpos = torch.cat(
+            (
+                torch.stack((spawn_x, spawn_y, torch.full_like(spawn_x, rc["height"])), dim=1),
+                quat,
+                self.init_dof_pos_all.expand(self.num_envs, -1),
+            ),
+            dim=1,
+        )
+        qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
+        self.robot.set_qpos(qpos, zero_velocity=False, skip_forward=True)
+        if all_envs:
+            self.robot.zero_all_dofs_velocity()
+        else:
+            vel = self.robot.get_dofs_velocity()
+            self.robot.set_dofs_velocity(torch.where(mask[:, None], torch.zeros_like(vel), vel), skip_forward=True)
+
+        # バッファのリセット
+        m1 = mask[:, None]
+        for buf in (self.base_lin_vel, self.base_ang_vel, self.dof_vel, self.actions, self.last_actions,
+                    self.last_dof_vel):
+            buf.masked_fill_(m1, 0.0)
+        torch.where(m1, qpos[:, self.motors_dof_idx + 1], self.dof_pos, out=self.dof_pos)  # qpos は姿勢が 4 要素なので +1
+        self.base_pos = torch.where(m1, qpos[:, :3], self.base_pos)
+        self.base_quat = torch.where(m1, qpos[:, 3:7], self.base_quat)
+        self.base_euler = torch.where(m1, quat_to_xyz(qpos[:, 3:7], rpy=True, degrees=False), self.base_euler)
+        self.projected_gravity = torch.where(
+            m1, transform_by_quat(self.global_gravity.expand(self.num_envs, -1), inv_quat(qpos[:, 3:7])),
+            self.projected_gravity,
+        )
+        self.episode_length_buf.masked_fill_(mask, 0)
+        for buf in (self.progress, self.best_progress, self.progress_gain):
+            buf.masked_fill_(mask, 0.0)
+        for buf in (self.succeeded, self.on_target, self.just_succeeded, self.fell, self.has_landed):
+            buf.masked_fill_(mask, False)
+        for buf in (self.grip, self.first_grip, self.gripped_once, self.feet_on_rung):
+            buf.masked_fill_(m1, False)
+        self.grip_force.masked_fill_(mask[:, None, None], 0.0)
+        self.feet_rung_idx.masked_fill_(m1, -1)
+        self.in_contact.masked_fill_(mask, True)
+        self.support_steps.masked_fill_(mask, 0)
+        self.flight_steps.masked_fill_(mask, 0)
+        self.reset_buf.masked_fill_(mask, True)
+
+    def reset(self):
+        self._reset_idx()
+        self.palms_pos = self._palms()
+        _, _, kmin, dmin, _ = self._ladder_coords(self.palms_pos)
+        self.palm_rung_dist, self.palm_rung_idx = dmin, kmin
+        self._update_observation()
+        return self.get_observations()
+
+    # ----------------------------------------------------------------------
+    # 報酬関数
+    # ----------------------------------------------------------------------
+    # --- タスク（sparse：dt を掛けない） ---
+    def _reward_progress(self):
+        return self.progress_gain
+
+    def _reward_success(self):
+        return self.just_succeeded.to(gs.tc_float)
+
+    def _reward_first_grip(self):
+        # 高い段の横棒を初めて握ったとき（片手ごとに一度だけ）
+        return self.first_grip.to(gs.tc_float).sum(dim=1)
+
+    def _reward_termination(self):
+        # 転倒して終わったとき。このエピソードで得た到達度の報酬も取り消す
+        fell = (self.fell & ~self.time_out_buf).to(gs.tc_float)
+        refund = self.best_progress * self.reward_cfg["sparse_scales"]["progress"] / abs(self.reward_scales["termination"])
+        return fell * (1.0 + refund)
+
+    # --- タスク（dense：毎ステップ） ---
+    def _reward_on_target(self):
+        # 目標の段に両足で立ち、手で握っている間
+        return self.on_target.to(gs.tc_float)
+
+    def _reward_alive(self):
+        return torch.ones((self.num_envs,), dtype=gs.tc_float, device=gs.device)
+
+    def _reward_grip_strain(self):
+        # 握力の限界に近い力で手を引きつけている（腕でぶら下がるより、足で体重を支えることを促す）
+        return (torch.norm(self.grip_force, dim=-1) / self.env_cfg["grip"]["max_force"]).square().sum(dim=1)
+
+    # --- 動きの質（dense） ---
+    def _reward_flight(self):
+        return (~self.in_contact).to(gs.tc_float)
+
+    def _reward_lin_vel_z(self):
+        return torch.square(self.base_lin_vel[:, 2])
+
+    def _reward_yaw_rate(self):
+        return torch.square(self.robot.get_ang()[:, 2])
+
+    def _reward_action_rate(self):
+        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+
+    def _reward_dof_acc(self):
+        return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
+
+    def _reward_dof_vel(self):
+        return torch.sum(torch.square(self.dof_vel), dim=1)
+
+    def _reward_dof_pos_limits(self):
+        lower, upper = self.soft_dof_limits
+        out_of_limits = -(self.dof_pos - lower).clip(max=0.0) + (self.dof_pos - upper).clip(min=0.0)
+        return torch.sum(out_of_limits, dim=1)
+
+    def _reward_contact_force(self):
+        excess = torch.norm(self.contact_forces, dim=-1) - self.reward_cfg["max_contact_force"]
+        return torch.sum(excess.clip(min=0.0), dim=1)
