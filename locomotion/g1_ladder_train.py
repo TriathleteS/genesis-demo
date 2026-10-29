@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v2。1 回目は g1-ladder）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v3。以前の版は g1-ladder, g1-ladder-v2）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -141,6 +141,18 @@ def get_cfgs():
             "lateral_range": 0.05,  # 左右のずれ [m]
             "yaw_range": 0.1,  # 向きのずれ [rad]
             "height": 0.8,  # 腰の高さ [m]
+            # はしごにぶら下がった姿勢から始めるエピソード（v3。逆向きのカリキュラム）
+            "hang": {
+                "prob": 0.3,  # エピソードのこの割合をぶら下がった姿勢から始める（段階の更新には使わない）
+                "rungs": (5, 7),  # 握る段（下から 6〜8 段目。足が床から浮く高さ）
+                "standoff": 0.05,  # 手のひらを横棒の中心線から、ロボットの側にこの距離 [m] 離して置く
+                # 腕を前に上げた姿勢（手のひらは腰から前に約 0.14 m、上に約 0.56 m）
+                "arm_pose": {
+                    "left_shoulder_pitch_joint": -2.0, "right_shoulder_pitch_joint": -2.0,
+                    "left_shoulder_roll_joint": 0.3, "right_shoulder_roll_joint": -0.3,
+                    "left_elbow_joint": 0.2, "right_elbow_joint": 0.2,
+                },
+            },
         },
         # タスクの判定
         "task": {
@@ -214,7 +226,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v2", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v3", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
