@@ -252,14 +252,21 @@ class G1LadderEnv:
             self.episode_sums[name] = torch.zeros((n,), **f)
 
         # ぶら下がった姿勢から始めるための準備（v3）：腕を上げた姿勢での、腰から見た手のひらの位置を測っておく
+        def arm_pose_info(arm_pose):
+            pose = dict(env_cfg["default_joint_angles"])
+            pose.update(arm_pose)
+            dof_pos_all = torch.tensor([pose[joint.name] for joint in self.robot.joints[1:]], **f)
+            qpos = torch.cat((torch.tensor([0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0], **f), dof_pos_all))
+            self.robot.set_qpos(qpos.expand(n, -1))
+            return dof_pos_all, self._palms()[0] - torch.tensor([0.0, 0.0, 1.0], **f)  # 関節角度, 腰から見た手のひらの位置 [2, 3]
+
         self.hang_cfg = env_cfg["reset"].get("hang")
         if self.hang_cfg:
-            pose = dict(env_cfg["default_joint_angles"])
-            pose.update(self.hang_cfg["arm_pose"])
-            self.hang_dof_pos_all = torch.tensor([pose[joint.name] for joint in self.robot.joints[1:]], **f)
-            qpos = torch.cat((torch.tensor([0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0], **f), self.hang_dof_pos_all))
-            self.robot.set_qpos(qpos.expand(n, -1))
-            self.hang_palm_offset = self._palms()[0] - torch.tensor([0.0, 0.0, 1.0], **f)  # [2, 3]
+            self.hang_dof_pos_all, self.hang_palm_offset = arm_pose_info(self.hang_cfg["arm_pose"])
+        # 床に立ったまま、肩の高さの段を両手で握った姿勢から始めるための準備（v4）
+        self.stand_cfg = env_cfg["reset"].get("stand_grip")
+        if self.stand_cfg:
+            self.stand_dof_pos_all, self.stand_palm_offset = arm_pose_info(self.stand_cfg["arm_pose"])
 
         self.extras = dict()
         self.reset()
@@ -601,7 +608,34 @@ class G1LadderEnv:
             hang_anchor = hang_pelvis[:, None, :] + transform_by_quat(
                 self.hang_palm_offset.expand(self.num_envs, -1, -1), hang_quat[:, None, :].expand(-1, 2, -1)
             )
-        self.is_hang = torch.where(mask, hang, self.is_hang)
+        # 一部の環境は、床に立ったまま、肩より少し上の段を両手で握った姿勢から始める（v4。床からはしごへ移る練習）
+        #   体はまっすぐ立てたまま、手のひらが横棒の少し手前に来る位置に立たせる。足がはしごの下に入ってしまう
+        #   緩やかなはしごや、腰が高く浮きすぎる場合は、ふつうの姿勢から始める
+        stand = torch.zeros_like(mask)
+        if self.stand_cfg and self.fixed_angle is None:
+            sc = self.stand_cfg
+            sin_t, cos_t = torch.sin(self.ladder_angle), torch.cos(self.ladder_angle)
+            off = self.stand_palm_offset.mean(dim=0)
+            palm_z = sc["height"] + off[2]
+            lc = self.env_cfg["ladder"]
+            m_s = torch.round((palm_z / sin_t - lc["rung_first"]) / lc["rung_spacing"]).long().clamp(1, self.num_rungs - 1)
+            target = self.rung_s[m_s][:, None] * self.ladder_u + sc["standoff"] * self.ladder_nrm
+            stand_pelvis = target - off
+            stand_pelvis[:, 1] = 0.0
+            stand_pelvis[:, 2] = stand_pelvis[:, 2].clamp(min=sc["height"])  # 脚が床にめり込まないように
+            foot_n = -sin_t * stand_pelvis[:, 0] + cos_t * 0.05
+            valid = (foot_n > -0.03) & (stand_pelvis[:, 2] < sc["height"] + 0.15)
+            stand = mask & ~review & ~hang & valid & (torch.rand((self.num_envs,), device=gs.device) < sc["prob"])
+            stand_qpos = torch.cat(
+                (stand_pelvis, torch.tensor([1.0, 0.0, 0.0, 0.0], device=gs.device).expand(self.num_envs, -1),
+                 self.stand_dof_pos_all.expand(self.num_envs, -1)),
+                dim=1,
+            )
+            qpos = torch.where(stand[:, None], stand_qpos, qpos)
+            stand_anchor = stand_pelvis[:, None, :] + self.stand_palm_offset[None]
+            _, _, _, d_anchor, _ = self._ladder_coords(stand_anchor)
+            stand_grip = stand[:, None] & (d_anchor < self.env_cfg["grip"]["grab_distance"])
+        self.is_hang = torch.where(mask, hang | stand, self.is_hang)
         qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
         self.robot.set_qpos(qpos, zero_velocity=False, skip_forward=True)
         if all_envs:
@@ -636,6 +670,11 @@ class G1LadderEnv:
             self.gripped_once |= hang[:, None]  # 最初から握っている分には、初めて握った報酬を出さない
             self.grip_anchor = torch.where(hang[:, None, None], hang_anchor, self.grip_anchor)
             self.grip_rung = torch.where(hang[:, None], m[:, None].expand(-1, 2), self.grip_rung)
+        if self.stand_cfg and self.fixed_angle is None:
+            self.grip |= stand_grip
+            self.gripped_once |= stand[:, None]
+            self.grip_anchor = torch.where(stand_grip[..., None], stand_anchor, self.grip_anchor)
+            self.grip_rung = torch.where(stand_grip, m_s[:, None].expand(-1, 2), self.grip_rung)
         self.feet_rung_idx.masked_fill_(m1, -1)
         self.in_contact.masked_fill_(mask, True)
         self.support_steps.masked_fill_(mask, 0)
