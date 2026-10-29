@@ -13,6 +13,7 @@ Genesis World 上でロボットを動かす・強化学習させるためのコ
    - [4.2 Go2（4 足）：数式による歩行](#42-go24-足数式による歩行)
    - [4.3 Go2（4 足）：強化学習](#43-go24-足強化学習)
    - [4.4 G1（ヒューマノイド）：強化学習](#44-g1ヒューマノイド強化学習)
+   - [4.5 G1（ヒューマノイド）：台へのよじ登り](#45-g1ヒューマノイド台へのよじ登り)
 5. [学習結果の管理（logs フォルダ）](#5-学習結果の管理logs-フォルダ)
 6. [ビューアーの操作](#6-ビューアーの操作)
 7. [録画](#7-録画)
@@ -34,8 +35,9 @@ genesis-demo/
 │   └─ go2_trot.py            Go2 を数式で作った軌道で歩かせる
 ├─ locomotion/           強化学習（歩行）
 │   ├─ go2_env.py / go2_train.py / go2_eval.py   Go2（Genesis 公式サンプル）
-│   └─ g1_env.py  / g1_train.py  / g1_eval.py    G1（Unitree 公式の設定を移植）
-├─ assets/unitree_g1/    G1 のモデル（URDF・形状ファイル・ライセンス）
+│   ├─ g1_env.py  / g1_train.py  / g1_eval.py    G1 の歩行（Unitree 公式の設定を移植）
+│   └─ g1_climb_env.py / g1_climb_train.py / g1_climb_eval.py   G1 の台へのよじ登り
+├─ assets/unitree_g1/    G1 のモデル（12 関節版・23 関節版の URDF、形状ファイル、ライセンス）
 ├─ docs/                 ドキュメント（このファイルなど）
 ├─ logs/                 学習結果（自動で作られる。Git には含めない）
 └─ videos/               録画した動画（自動で作られる。Git には含めない）
@@ -245,6 +247,45 @@ uv run python locomotion/g1_eval.py --ckpt 999 --no-viewer --duration 20
 
 終了時に「最終位置・向き・平均速度・転倒回数」が表示されます。
 平均速度は「スタート地点から最終位置までの直線距離 ÷ 時間」なので、まっすぐ歩くときだけ意味があります。旋回を含む場合は、[8. これまでの結果の記録](#8-これまでの結果の記録) のように、理想の円軌道の最終位置・向きと比べます。
+
+### 4.5 G1（ヒューマノイド）：台へのよじ登り
+
+腕のある 23 関節版の G1 が、正面の台に手足を使って登り、台の上に立つことを学習します。参照動作は使わず、報酬設計とカリキュラムだけで学習します。
+
+**学習**
+
+```powershell
+uv run python locomotion/g1_climb_train.py                                    # 4096 体 × 3000 イテレーション
+uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000  # 続きを学習する
+```
+
+オプションは G1 の歩行と同じです（既定の実験名は `g1-climb`）。
+
+**再生・評価**
+
+```powershell
+uv run python locomotion/g1_climb_eval.py                          # 最新のチェックポイントで、高さ 0.6 m の台に挑戦
+uv run python locomotion/g1_climb_eval.py --height 0.4             # 台の高さを変える
+uv run python locomotion/g1_climb_eval.py --no-viewer --trials 20 --height 0.4   # 画面なしで 20 回挑戦し、成功率を表示
+uv run python locomotion/g1_climb_eval.py --record --height 0.6    # 録画する
+```
+
+1 回の挑戦は最大 10 秒で、転倒するか 10 秒たつと自動で台の手前に戻って次の挑戦を始めます。ビューアーでのキー操作は Enter（開始・一時停止）と Backspace（台の手前に戻す）です。
+
+**学習の仕組み（要点）**
+
+- **進み具合の報酬**：「足を台の高さまで上げた」「台に乗った足の数」「腰の高さ」を組み合わせた到達度（0〜1）を、そのエピソードの最高記録を更新したときだけ与える。転倒したら、そのエピソードで得た分を取り消す。
+- **台の高さのカリキュラム**：0.2 m から 1.0 m まで 0.05 m 刻み。登れたら次の挑戦で台を高くし、ほとんど進めなかったら低くする。
+- **補助の力**：手か足が台の上に触れている間だけ、腰を上向きに支える（最初は体重の 40%）。最初の 1500 イテレーションで 0 まで下げる。
+
+**学習中に TensorBoard で見る項目**
+
+| 項目 | 意味 |
+|---|---|
+| `Curriculum/mean_height` | 全環境の台の高さの平均。上がっていけば、高い台に登れるようになっている |
+| `Curriculum/success_rate` | 登り切れたエピソードの割合（移動平均） |
+| `Curriculum/assist` | 補助の力の強さ（体重に対する割合） |
+| `Train/mean_episode_length` | 転ばずに続いたステップ数（最大 500 = 10 秒） |
 
 ---
 

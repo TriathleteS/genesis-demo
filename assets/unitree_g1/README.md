@@ -1,9 +1,10 @@
-# Unitree G1（脚 12 関節）のロボットモデル
+# Unitree G1 のロボットモデル
 
-`locomotion/g1_env.py` が読み込むヒューマノイド Unitree G1 のモデルです。
+`locomotion/` の学習スクリプトが読み込むヒューマノイド Unitree G1 のモデルです。
 
-- `g1_12dof.urdf`：脚の 12 関節だけを動かせるモデル（腰・腕・頭は固定）
-- `meshes/`：上記 URDF が参照する形状ファイル（必要なものだけを抜粋）
+- `g1_12dof.urdf`：脚の 12 関節だけを動かせるモデル（腰・腕・頭は固定）。歩行（`g1_env.py`）で使う
+- `g1_23dof_rev_1_0.urdf`：脚 12・腰 1・腕 10 の 23 関節を動かせるモデル。よじ登り（`g1_climb_env.py`）で使う
+- `meshes/`：上記 URDF が参照する形状ファイル（必要なものだけを抜粋。両方の URDF で共通）
 - `LICENSE`：配布元のライセンス（BSD 3-Clause License）
 
 ## 入手元
