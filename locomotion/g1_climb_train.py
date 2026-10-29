@@ -5,7 +5,7 @@
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v3。以前の版は g1-climb, g1-climb-v2）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v4。以前の版は g1-climb, g1-climb-v2, g1-climb-v3）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -125,7 +125,10 @@ def get_cfgs():
         # タスクの判定
         "task": {
             "stand_height": 0.78,  # 立っているときの腰の高さ [m]
-            "progress_weights": (0.7, 0.3),  # 到達度の内訳：全身の重心の上がった割合・台に乗った足の数
+            # 到達度の内訳：足を上げた高さ・全身の重心の上がった割合・台に乗った足の数
+            # （足を上げた高さは最初の手がかり。これがないと台に近づく理由がなく、何もしないまま学習が止まる）
+            "progress_weights": (0.15, 0.6, 0.25),
+            "foot_near_box_x": 0.3,  # 台の正面からこの距離 [m] 以内の足だけ「足を上げた高さ」に数える
             "stand_com_height": 0.68,  # 立っているときの全身の重心の高さ [m]
             "support_min_steps": 5,  # 手か足が台に触れ続けてこのステップ数（0.1 秒）たってから重心の高さを数える
             "max_rise_speed": 0.8,  # 胴体の上下の速さがこれ [m/s] 未満のときだけ重心の高さを数える
@@ -193,7 +196,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v3", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v4", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

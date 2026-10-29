@@ -349,7 +349,7 @@ class G1ClimbEnv:
             & (hands_force > 5.0)
         )
 
-        # 到達度（0〜1）= 重心の上がった割合 × 重み + 台に乗った足の数の割合 × 重み
+        # 到達度（0〜1）= 足を上げた高さ × 重み + 重心の上がった割合 × 重み + 台に乗った足の数の割合 × 重み
         #   重心の上がった割合：立っているときの重心の高さから、台の高さぶん上がれば 1。
         #   次の両方を満たすときだけ数える（跳び上がって一瞬だけ重心が上がった分を数えないため）：
         #     ・手か足が台の上に support_min_steps ステップ以上触れ続けている
@@ -360,12 +360,17 @@ class G1ClimbEnv:
         steady = ((self.support_steps >= tc.get("support_min_steps", 5)) & slow).to(gs.tc_float)
         p_com = ((self.com_pos[:, 2] - tc.get("stand_com_height", 0.68)) / h.clamp(min=0.05)).clamp(0.0, 1.0) * steady
         p_feet = self.feet_on_box.to(gs.tc_float).mean(dim=1)
+        # 足を上げた高さ：台の近くにある足を、台の高さまで上げた割合（最初の手がかり。重みは小さくする）
+        self.feet_lift = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
+        near_box = (self.feet_pos[:, :, 0] > -tc.get("foot_near_box_x", 0.3)).to(gs.tc_float)
+        p_lift = (self.feet_lift * near_box).max(dim=1).values
         w = tc["progress_weights"]
-        self.progress = w[0] * p_com + w[1] * p_feet
+        if len(w) == 3:
+            self.progress = w[0] * p_lift + w[1] * p_com + w[2] * p_feet
+        else:
+            self.progress = w[0] * p_com + w[1] * p_feet
         self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
         self.best_progress = torch.maximum(self.best_progress, self.progress)
-        # 足ごとの「台の高さまで上げた割合」（後ろ足を上げる報酬に使う）
-        self.feet_lift = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
 
         # 台の上に立てているか：両足が台の上、腰が十分高く、体が起きている
         upright = torch.norm(self.projected_gravity[:, :2], dim=1) < tc["upright_tilt"]
