@@ -3,7 +3,8 @@
 歩行（g1_env.py）との主な違い:
   - 目標到達型のタスク：台に近づき、手をつき、体を引き上げ、台の上に立つ（周期的な歩行の位相は使わない）
   - 進み具合の報酬は「これまでの最高到達度を更新したときだけ」与える（APEX と同じ考え方。
-    行ったり来たりして報酬を稼ぐ抜け道や、飛びつくような乱暴な動きを防ぐ）
+    行ったり来たりして報酬を稼ぐ抜け道を防ぐ）。到達度は主に「全身の重心がどれだけ上がったか」で測り、
+    手か足が台の上に 0.1 秒以上触れている間だけ数える（跳び上がった一瞬の高さを数えないため）
   - 台の高さのカリキュラム：環境ごとに台の高さの段階を持ち、登れたら高く、登れなければ低くする
   - 補助の力のカリキュラム：学習の初期は、台の近くで腰を持ち上げる力をかけ、学習が進むにつれて 0 にする
     （参照動作なしで「体を引き上げる」動きを見つけさせるため）
@@ -119,6 +120,7 @@ class G1ClimbEnv:
         self.hands_links_idx = [link(n) for n in env_cfg["hand_link_names"]]
         self.base_link_idx = link(env_cfg["base_link_name"])
         self.robot_mass = float(self.robot.get_mass())
+        self.link_masses = self.robot.get_links_mass().reshape(-1, self.robot.n_links)[0]  # 全身の重心の計算に使う
 
         # ------------------------------------------------------------------
         # バッファ
@@ -168,6 +170,13 @@ class G1ClimbEnv:
         self.hands_touched = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)  # このエピソードで手が台に触れたか
         self.hands_first_touch = torch.zeros((n, 2), dtype=gs.tc_bool, device=gs.device)
         self.in_contact = torch.ones((n,), dtype=gs.tc_bool, device=gs.device)  # 体のどこかが床か台に触れているか
+        self.feet_lift = torch.zeros((n, 2), **f)
+        self.com_pos = torch.zeros((n, 3), **f)  # 全身の重心の位置
+        self.base_vel_world = torch.zeros((n, 3), **f)  # 胴体の速度（ワールド座標）
+        self.support_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 手か足が台の上に触れ続けているステップ数
+        # 確認用：到達度の更新のうち、跳んでいる最中に起きた割合（移動平均）
+        self._gain_total = torch.zeros((), **f)
+        self._gain_jumping = torch.zeros((), **f)
 
         # 台の高さのカリキュラム（環境ごとの段階）
         cc = curriculum_cfg
@@ -287,7 +296,8 @@ class G1ClimbEnv:
         self.base_quat = self.robot.get_quat()
         self.base_euler = quat_to_xyz(self.base_quat, rpy=True, degrees=False)
         inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
+        self.base_vel_world = self.robot.get_vel()
+        self.base_lin_vel = transform_by_quat(self.base_vel_world, inv_base_quat)
         self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
         self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
@@ -295,6 +305,8 @@ class G1ClimbEnv:
         self.contact_forces = self.robot.get_links_net_contact_force()
         self.feet_pos = self.robot.get_links_pos(self.feet_links_idx)
         self.hands_pos = self.robot.get_links_pos(self.hands_links_idx)
+        links_com = self.robot.get_links_pos(ref=gs.link_ref_frame.link_COM)
+        self.com_pos = (links_com * self.link_masses[None, :, None]).sum(dim=1) / self.link_masses.sum()
         self._update_task_state()
 
         # 終了判定
@@ -337,17 +349,23 @@ class G1ClimbEnv:
             & (hands_force > 5.0)
         )
 
-        # 到達度（0〜1）：台の近くで足を台の高さまで上げた割合・台に乗った足の数・腰の高さが上がった割合を組み合わせる。
-        # 「前に進んだ距離」は入れない（入れると、台に飛びついて覆いかぶさる動きに報酬が出てしまう）
-        near_box = self.feet_pos[:, :, 0] > -tc["foot_near_box_x"]
-        lift = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
-        p_lift = (lift * near_box.to(gs.tc_float)).max(dim=1).values
+        # 到達度（0〜1）= 重心の上がった割合 × 重み + 台に乗った足の数の割合 × 重み
+        #   重心の上がった割合：立っているときの重心の高さから、台の高さぶん上がれば 1。
+        #   次の両方を満たすときだけ数える（跳び上がって一瞬だけ重心が上がった分を数えないため）：
+        #     ・手か足が台の上に support_min_steps ステップ以上触れ続けている
+        #     ・胴体の上下の速さが max_rise_speed 未満（台にかけた足で蹴って跳び上がる動きを除く）
+        supported = self.feet_on_box.any(dim=1) | self.hands_on_box.any(dim=1)
+        self.support_steps = torch.where(supported, self.support_steps + 1, torch.zeros_like(self.support_steps))
+        slow = torch.abs(self.base_vel_world[:, 2]) < tc.get("max_rise_speed", 0.8)
+        steady = ((self.support_steps >= tc.get("support_min_steps", 5)) & slow).to(gs.tc_float)
+        p_com = ((self.com_pos[:, 2] - tc.get("stand_com_height", 0.68)) / h.clamp(min=0.05)).clamp(0.0, 1.0) * steady
         p_feet = self.feet_on_box.to(gs.tc_float).mean(dim=1)
-        p_z = ((self.base_pos[:, 2] - tc["stand_height"]) / h.clamp(min=0.05)).clamp(0.0, 1.0)
         w = tc["progress_weights"]
-        self.progress = w[0] * p_lift + w[1] * p_feet + w[2] * p_z
+        self.progress = w[0] * p_com + w[1] * p_feet
         self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
         self.best_progress = torch.maximum(self.best_progress, self.progress)
+        # 足ごとの「台の高さまで上げた割合」（後ろ足を上げる報酬に使う）
+        self.feet_lift = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
 
         # 台の上に立てているか：両足が台の上、腰が十分高く、体が起きている
         upright = torch.norm(self.projected_gravity[:, :2], dim=1) < tc["upright_tilt"]
@@ -362,6 +380,11 @@ class G1ClimbEnv:
 
         # 体のどこかが床か台に触れているか（触れていない＝跳んでいる）
         self.in_contact = (torch.norm(self.contact_forces, dim=-1) > 1.0).any(dim=1)
+
+        # 確認用：到達度の更新が「跳んでいる最中（どこも触れていない、または上向きに 1 m/s 以上で上昇中）」に起きた割合
+        jumping = (~self.in_contact) | (self.base_lin_vel[:, 2] > 1.0)
+        self._gain_total = 0.999 * self._gain_total + self.progress_gain.sum()
+        self._gain_jumping = 0.999 * self._gain_jumping + (self.progress_gain * jumping.to(gs.tc_float)).sum()
 
         # 転倒：台の手前で腰が低すぎる／大きく横に倒れた／前に倒れすぎた（台に覆いかぶさる）／後ろに倒れた
         over_box = self.base_pos[:, 0] > 0.0
@@ -443,6 +466,7 @@ class G1ClimbEnv:
         self.extras["episode"]["Curriculum/max_height"] = heights.max()
         self.extras["episode"]["Curriculum/assist"] = torch.tensor(self.assist_scale)
         self.extras["episode"]["Curriculum/success_rate"] = torch.tensor(self.success_rate_ema)
+        self.extras["episode"]["Check/progress_gain_while_jumping"] = self._gain_jumping / self._gain_total.clamp(min=1e-6)
 
         # ロボットを台の手前に置き直す（距離と向きを少しランダムにする）
         rc = self.env_cfg["reset"]
@@ -491,6 +515,7 @@ class G1ClimbEnv:
         self.hands_touched.masked_fill_(m1, False)
         self.hands_first_touch.masked_fill_(m1, False)
         self.in_contact.masked_fill_(mask, True)
+        self.support_steps.masked_fill_(mask, 0)
         self.feet_on_box.masked_fill_(m1, False)
         self.hands_on_box.masked_fill_(m1, False)
         self.reset_buf.masked_fill_(mask, True)
@@ -532,6 +557,16 @@ class G1ClimbEnv:
     def _reward_hands_on_box(self):
         # 台の上に立つ前に、手を台の上についている（腕を使うことを促す）
         return self.hands_on_box.to(gs.tc_float).sum(dim=1) * (~self.on_top).to(gs.tc_float)
+
+    def _reward_trailing_foot(self):
+        # 片足だけが台の上にあるとき、もう一方の足を台の高さまで上げるほど報酬（後ろ足を台に引き上げさせる）
+        one_foot = (self.feet_on_box.sum(dim=1) == 1).to(gs.tc_float)
+        other_lift = (self.feet_lift * (~self.feet_on_box).to(gs.tc_float)).sum(dim=1)
+        return one_foot * other_lift
+
+    def _reward_lean_back(self):
+        # 後ろに大きくのけぞる姿勢（片足を台にかけたまま体を後ろに倒して踏ん張る）を抑える
+        return torch.square((-self.base_euler[:, 1] - 0.2).clamp(min=0.0))
 
     def _reward_alive(self):
         return torch.ones((self.num_envs,), dtype=gs.tc_float, device=gs.device)
