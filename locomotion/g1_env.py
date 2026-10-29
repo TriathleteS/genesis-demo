@@ -34,7 +34,7 @@ def gs_rand(lower, upper, batch_shape):
 
 
 class G1Env:
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False):
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, camera_res=None):
         self.num_envs: int = num_envs
         self.num_actions = env_cfg["num_actions"]
         self.num_commands = command_cfg["num_commands"]
@@ -86,6 +86,18 @@ class G1Env:
                 quat=env_cfg["base_init_quat"],
             ),
         )
+
+        # 録画用のカメラ（camera_res=(幅, 高さ) を指定したときだけ追加する。ビューアーとは別に画面外で描画する）
+        self.camera = None
+        if camera_res is not None:
+            self.camera = self.scene.add_camera(
+                res=camera_res,
+                pos=(2.0, -2.0, 1.2),
+                lookat=(0.0, 0.0, 0.7),
+                fov=40,
+                GUI=False,
+                env_idx=0,  # 1 体目を撮る（指定しないと動画のファイル名に環境番号が付く）
+            )
 
         self.scene.build(n_envs=num_envs)
 
