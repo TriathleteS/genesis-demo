@@ -2,10 +2,12 @@
 
 実行方法（genesis-demo フォルダで）:
     uv run python locomotion/g1_climb_train.py                         # 4096 環境 × 3000 イテレーション
+    uv run python locomotion/g1_climb_train.py --replay locomotion/climb_start_states.pt
+                                                                       # 保存しておいた途中の姿勢から始めるエピソードを 3 割混ぜる
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v4。以前の版は g1-climb, g1-climb-v2, g1-climb-v3）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v5。以前の版は g1-climb, g1-climb-v2, g1-climb-v3, g1-climb-v4）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -196,18 +198,26 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v4", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v5", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
     parser.add_argument("--seed", type=int, default=1, help="乱数のシード")
     parser.add_argument("--cpu", action="store_true", help="CPU で実行する（動作確認用。学習には GPU が必要）")
+    parser.add_argument(
+        "--replay", type=str, default=None, metavar="FILE",
+        help="保存しておいた「登る途中・登った後」の姿勢（g1_climb_collect_states.py で作成）から始めるエピソードを混ぜる",
+    )
+    parser.add_argument("--replay-prob", type=float, default=0.3, help="--replay の姿勢から始めるエピソードの割合")
     args = parser.parse_args()
 
     log_dir = f"logs/{args.exp_name}"
     if args.resume is None:
         env_cfg, obs_cfg, reward_cfg, curriculum_cfg = get_cfgs()
         train_cfg = get_train_cfg(args.exp_name)
+        if args.replay:
+            env_cfg["reset"]["replay_file"] = os.path.abspath(args.replay)
+            env_cfg["reset"]["replay_prob"] = args.replay_prob
         if os.path.exists(log_dir):
             shutil.rmtree(log_dir)
         os.makedirs(log_dir, exist_ok=True)

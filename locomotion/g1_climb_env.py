@@ -184,6 +184,19 @@ class G1ClimbEnv:
         self.levels = torch.randint(0, cc["init_max_level"] + 1, (n,), device=gs.device)
         self.box_height = torch.zeros((n,), **f)
         self.fixed_height = None  # 評価時に台の高さを固定するためのもの
+        # 開始姿勢の再利用：以前の方策が到達した「登る途中・登った後」の姿勢から始めるエピソードを混ぜる
+        self.height_override = torch.full((n,), float("nan"), **f)  # その環境の台の高さを固定する（nan なら段階どおり）
+        self.is_replay = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
+        self.replay_qpos = None
+        replay_file = env_cfg["reset"].get("replay_file")
+        if replay_file:
+            if not os.path.isabs(replay_file):
+                replay_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), replay_file)
+            data = torch.load(replay_file, map_location=gs.device)
+            self.replay_qpos = data["qpos"].to(**f)
+            self.replay_height = data["height"].to(**f)
+            # 姿勢の種類（0: 片足が台の上, 1: 台の上に立つ, 2: 手が台の上）
+            self.replay_kind = data.get("kind", torch.zeros_like(data["height"])).to(device=gs.device)
         self._update_box_height(None)
 
         # 補助の力のカリキュラム（学習の経過に応じて減らす）
@@ -227,6 +240,7 @@ class G1ClimbEnv:
         height = cc["height_min"] + self.levels.to(gs.tc_float) * cc["height_step"]
         if self.fixed_height is not None:
             height = torch.full_like(height, self.fixed_height)
+        height = torch.where(torch.isnan(self.height_override), height, self.height_override)
         if envs_idx is None:
             self.box_height.copy_(height)
         else:
@@ -369,6 +383,9 @@ class G1ClimbEnv:
             self.progress = w[0] * p_lift + w[1] * p_com + w[2] * p_feet
         else:
             self.progress = w[0] * p_com + w[1] * p_feet
+        # 途中の姿勢から始めたエピソードは、始めた時点の到達度を基準にする（何もせずに報酬が出ないように）
+        fresh_replay = self.is_replay & (self.episode_length_buf <= 1)
+        self.best_progress = torch.where(fresh_replay, self.progress, self.best_progress)
         self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
         self.best_progress = torch.maximum(self.best_progress, self.progress)
 
@@ -376,10 +393,12 @@ class G1ClimbEnv:
         upright = torch.norm(self.projected_gravity[:, :2], dim=1) < tc["upright_tilt"]
         high = self.base_pos[:, 2] > h + tc["stand_height"] * 0.8
         self.on_top = self.feet_on_box.all(dim=1) & high & upright
+        self.succeeded |= fresh_replay & self.on_top  # 台の上から始めた場合は、成功の報酬を出さない
         self.just_succeeded = self.on_top & ~self.succeeded
         self.succeeded |= self.on_top
 
         # 手が初めて台の上に触れたか（腕を使うことを促す一度きりの報酬に使う）
+        self.hands_touched |= fresh_replay[:, None] & self.hands_on_box
         self.hands_first_touch = self.hands_on_box & ~self.hands_touched
         self.hands_touched |= self.hands_on_box
 
@@ -464,7 +483,20 @@ class G1ClimbEnv:
 
         # カリキュラムの更新（評価時は台の高さを固定する）
         if not all_envs and self.fixed_height is None:
-            self._update_curriculum(mask)
+            self._update_curriculum(mask & ~self.is_replay)  # 途中の姿勢から始めたエピソードは段階の更新に使わない
+
+        # 一部の環境は、保存しておいた「登る途中・登った後」の姿勢から始める
+        rc = self.env_cfg["reset"]
+        replay = torch.zeros_like(mask)
+        replay_idx = None
+        if self.replay_qpos is not None and self.fixed_height is None:
+            replay = mask & (torch.rand((self.num_envs,), device=gs.device) < rc.get("replay_prob", 0.0))
+            replay_idx = torch.randint(0, self.replay_qpos.shape[0], (self.num_envs,), device=gs.device)
+            override = torch.where(replay, self.replay_height[replay_idx], torch.full_like(self.box_height, float("nan")))
+        else:
+            override = torch.full_like(self.box_height, float("nan"))
+        self.height_override = torch.where(mask, override, self.height_override)
+        self.is_replay = torch.where(mask, replay, self.is_replay)
         self._update_box_height(None if all_envs else mask)
         heights = self.curriculum_cfg["height_min"] + self.levels.to(gs.tc_float) * self.curriculum_cfg["height_step"]
         self.extras["episode"]["Curriculum/mean_height"] = heights.mean()
@@ -474,7 +506,6 @@ class G1ClimbEnv:
         self.extras["episode"]["Check/progress_gain_while_jumping"] = self._gain_jumping / self._gain_total.clamp(min=1e-6)
 
         # ロボットを台の手前に置き直す（距離と向きを少しランダムにする）
-        rc = self.env_cfg["reset"]
         spawn_x = -gs_rand(*rc["distance_range"], (self.num_envs,))
         spawn_y = gs_rand(-rc["lateral_range"], rc["lateral_range"], (self.num_envs,))
         spawn_yaw = gs_rand(-rc["yaw_range"], rc["yaw_range"], (self.num_envs,))
@@ -490,6 +521,8 @@ class G1ClimbEnv:
             ),
             dim=1,
         )
+        if replay_idx is not None:
+            qpos = torch.where(replay[:, None], self.replay_qpos[replay_idx], qpos)
         qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
         self.robot.set_qpos(qpos, zero_velocity=False, skip_forward=True)
         if all_envs:
@@ -503,20 +536,22 @@ class G1ClimbEnv:
         for buf in (self.base_lin_vel, self.base_ang_vel, self.dof_vel, self.actions, self.last_actions,
                     self.last_dof_vel):
             buf.masked_fill_(m1, 0.0)
-        torch.where(m1, self.default_dof_pos, self.dof_pos, out=self.dof_pos)
+        torch.where(m1, qpos[:, self.motors_dof_idx + 1], self.dof_pos, out=self.dof_pos)  # qpos は姿勢が 4 要素なので +1
         self.base_pos = torch.where(m1, qpos[:, :3], self.base_pos)
         self.base_quat = torch.where(m1, qpos[:, 3:7], self.base_quat)
-        self.base_euler = torch.where(
-            m1, torch.stack((torch.zeros_like(spawn_yaw),) * 2 + (spawn_yaw,), dim=1), self.base_euler
-        )
+        self.base_euler = torch.where(m1, quat_to_xyz(qpos[:, 3:7], rpy=True, degrees=False), self.base_euler)
         self.projected_gravity = torch.where(
-            m1, torch.tensor([0.0, 0.0, -1.0], dtype=gs.tc_float, device=gs.device), self.projected_gravity
+            m1, transform_by_quat(self.global_gravity.expand(self.num_envs, -1), inv_quat(qpos[:, 3:7])),
+            self.projected_gravity,
         )
         self.episode_length_buf.masked_fill_(mask, 0)
         for buf in (self.progress, self.best_progress, self.progress_gain):
             buf.masked_fill_(mask, 0.0)
         for buf in (self.succeeded, self.on_top, self.just_succeeded, self.fell):
             buf.masked_fill_(mask, False)
+        if replay_idx is not None:
+            # 台の上に立った姿勢から始めた場合は、最初から「登れた」扱いにする（成功の報酬は出さず、台から降りたら失敗）
+            self.succeeded |= replay & (self.replay_kind[replay_idx] == 1)
         self.hands_touched.masked_fill_(m1, False)
         self.hands_first_touch.masked_fill_(m1, False)
         self.in_contact.masked_fill_(mask, True)
