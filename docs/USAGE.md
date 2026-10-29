@@ -259,12 +259,15 @@ uv run python locomotion/g1_climb_train.py                                    # 
 uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000  # 続きを学習する
 ```
 
-オプションは G1 の歩行と同じです。既定の実験名は `g1-climb-v8b` で、再生スクリプトも同じ名前を既定で読みます。v5 以降は `--replay locomotion/climb_start_states.pt` を付けて学習します（下記「途中の姿勢から始める」参照）。以前の版を再生するときは `-e g1-climb-v5` などを付けます。
+オプションは G1 の歩行と同じです。既定の実験名は `g1-climb-v9a` で、再生スクリプトも同じ名前を既定で読みます。v5 以降は `--replay locomotion/climb_start_states.pt` を付けて学習します（下記「途中の姿勢から始める」参照）。以前の版を再生するときは `-e g1-climb-v5` などを付けます。
 
 ```powershell
 uv run python locomotion/g1_climb_train.py -e g1-climb-v7 --replay locomotion/climb_start_states.pt   # v7 の学習（最初から）
 uv run python locomotion/g1_climb_train.py --init-from g1-climb-v7:2999 --max-iterations 1000 --replay locomotion/climb_start_states.pt
                                                                               # v8b の学習（v7 の学習済みモデルから始める）
+uv run python locomotion/g1_climb_train.py -e g1-climb-v9a --init-from g1-climb-v8b:3998 --max-iterations 1000 --replay locomotion/climb_start_states.pt
+uv run python locomotion/g1_climb_train.py -e g1-climb-v9b --height-max 1.2 --init-from g1-climb-v8b:3998 --max-iterations 1000 --replay locomotion/climb_start_states.pt
+                                                                              # v9a・v9b の学習（v8b の学習済みモデルから始める）
 ```
 
 **再生・評価**
@@ -289,6 +292,8 @@ uv run python locomotion/g1_climb_eval.py --record --height 0.6    # 録画す�
 - **向きのペナルティ**（v6・v7 では無効、v8 で有効）：胴体（腰）の向きが台の方向から 90°（1.57 rad）以上回ると、はみ出した角度の 2 乗 × 2 を毎秒減点。90° までは減点しないので、横向きになって脚を台に掛ける登り方は許す。
 - **両手で体を支える報酬**（v8）：0.6 m 以上の台で、少なくとも片足がまだ床についている間に両手を台の上についたら、1 エピソードに一度だけ 5 点。「手をついてから足を上げる」順番を促す。
 - **学習済みモデルから始める**（v8、`--init-from 実験名:イテレーション`）：別の実験のモデルを読み込み、今の設定（報酬など）で学習を続ける。補助の力は最初から 0。v8b からは、最初の台の高さを全段階（0.1〜1.0 m）からランダムに選ぶ。
+- **回転の速さのペナルティ**（v9）：体の向きを変える速さ（鉛直軸まわりの角速度）の 2 乗 × 0.3 を毎秒減点。向きそのものではなく、くるっと回る動きを抑える。
+- **台の高さの上限の変更**（v9b、`--height-max`）：カリキュラムの上限を 1.0 m から変える。
 - **低い台の復習**（v8b）：エピソードの 2 割は、段階と関係なく 0.1〜1.0 m のランダムな高さで練習する（段階の更新には使わない）。
 
 **学習中に TensorBoard で見る項目**
@@ -517,6 +522,19 @@ uv run python locomotion/g1_eval.py --record --no-viewer --duration 20   # 画�
 - 低い台の復習（エピソードの 2 割はランダムな高さ）を追加。
 - 学習済みモデルから始めるときは、最初の台の高さを全段階からランダムに選ぶ。
 - 報酬は v8 と同じ（向きのペナルティ、両手で体を支える報酬）。
+
+**8 回目のやり直し（`g1-climb-v8b`、v7 の model_2999 から 1000 イテレーション）の結果**
+
+- 低い台の復習が効き、学習はすぐに立ち直った：100 イテレーションで `success_rate` 0.95、最後は 0.97、台の高さの平均 0.93 m。
+- 動き（0.02 秒ごとに記録）：0.3 秒で正面を向いたまま片足を台にかけ、0.4〜1.1 秒に台の上の足を軸に左回りに約 250° 回りながら体を引き上げ、最後は横向き（台の方向から約 -90°〜-110°）で台の上に立って静止する。跳ばずに登り、台の上でも安定している（予備のデモとして録画済み）。
+- 手は一度も台につかなかった（`rew_hands_support` は最初から最後まで 0）。脚だけで登れるので、手をつく動きを偶然見つける機会がない。
+- 向きのペナルティ（90° まで減点なし）は、最後の向きが 90° 前後に収まり、180° 付近を通るのは約 0.3 秒だけなので、ほとんど効かなかった。
+
+**9 回目（`g1-climb-v9a`・`g1-climb-v9b`）で変えた点**
+
+- どちらも v8b の学習済みモデル（model_3998）から 1000 イテレーション。
+- v9a：回転の速さのペナルティ（上記）を追加。今の回り方（約 0.7 秒で 250°）だと約 -8 点。ゆっくり横を向く登り方は妨げない。
+- v9b：v9a に加えて、台の高さの上限を 1.2 m に。股関節の可動範囲から見ると、脚だけで足を上げられるのは約 1.2〜1.3 m までなので、1.1〜1.2 m の台では手・ひじ・胸などを台に掛ける必要が出る（腕の力が弱いので、登れずに終わる可能性もある）。
 
 **教訓（報酬設計の難しさ）**
 

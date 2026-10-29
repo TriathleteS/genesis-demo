@@ -8,8 +8,10 @@
                                                                        # model_2999.pt から 1000 イテレーション続ける
     uv run python locomotion/g1_climb_train.py --init-from g1-climb-v7:2999 --max-iterations 1000 --replay locomotion/climb_start_states.pt
                                                                        # v7 の学習済みモデルから、今の設定で 1000 イテレーション学習する（v8）
+    uv run python locomotion/g1_climb_train.py -e g1-climb-v9b --height-max 1.2 --init-from g1-climb-v8b:3998 --max-iterations 1000 --replay locomotion/climb_start_states.pt
+                                                                       # 台の高さの上限を 1.2 m にする（v9b）
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v8b。以前の版は g1-climb, g1-climb-v2〜v8）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v9a。以前の版は g1-climb, g1-climb-v2〜v8b）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -189,6 +191,7 @@ def get_cfgs():
             "contact_force": -5e-3,
             "flight": -5.0,  # 体のどこも床や台に触れていない（跳んでいる）間
             "lin_vel_z": -1.0,  # 胴体の上下の速さの 2 乗
+            "yaw_rate": -0.3,  # 体の向きを変える速さの 2 乗（v9。毎秒 10 rad で 0.4 秒回ると約 -12）
         },
     }
     curriculum_cfg = {
@@ -212,7 +215,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v8b", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v9a", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
@@ -226,6 +229,10 @@ def main():
         "--init-from", type=str, default=None, metavar="EXP:ITER",
         help="別の実験の学習済みモデルから学習を始める（例：g1-climb-v7:2999）。報酬などの設定は今回のものを使う",
     )
+    parser.add_argument(
+        "--height-max", type=float, default=None,
+        help="台の高さのカリキュラムの上限 [m]（省略時は 1.0。v9b では 1.2）",
+    )
     parser.add_argument("--replay-prob", type=float, default=0.3, help="--replay の姿勢から始めるエピソードの割合")
     args = parser.parse_args()
 
@@ -233,6 +240,8 @@ def main():
     if args.resume is None:
         env_cfg, obs_cfg, reward_cfg, curriculum_cfg = get_cfgs()
         train_cfg = get_train_cfg(args.exp_name)
+        if args.height_max is not None:
+            curriculum_cfg["height_max"] = args.height_max
         if args.init_from:
             # 学習済みのモデルから始めるときは、最初の台の高さを全段階（0.1〜1.0 m）からランダムに選ぶ
             n_levels = int(round((curriculum_cfg["height_max"] - curriculum_cfg["height_min"]) / curriculum_cfg["height_step"])) + 1
