@@ -42,7 +42,7 @@ from g1_climb_env import G1ClimbEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v5", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v6", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--height", type=float, default=0.6, help="台の高さ [m]")
     parser.add_argument("--no-wait", action="store_true", help="Enter を待たずにすぐ始める")

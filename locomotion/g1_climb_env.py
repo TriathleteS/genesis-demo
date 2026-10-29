@@ -174,6 +174,8 @@ class G1ClimbEnv:
         self.com_pos = torch.zeros((n, 3), **f)  # 全身の重心の位置
         self.base_vel_world = torch.zeros((n, 3), **f)  # 胴体の速度（ワールド座標）
         self.support_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 手か足が台の上に触れ続けているステップ数
+        self.flight_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 体のどこも触れていない状態が続いたステップ数
+        self.has_landed = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)  # 置き直した後、一度でも床か台に触れたか
         # 確認用：到達度の更新のうち、跳んでいる最中に起きた割合（移動平均）
         self._gain_total = torch.zeros((), **f)
         self._gain_jumping = torch.zeros((), **f)
@@ -404,6 +406,8 @@ class G1ClimbEnv:
 
         # 体のどこかが床か台に触れているか（触れていない＝跳んでいる）
         self.in_contact = (torch.norm(self.contact_forces, dim=-1) > 1.0).any(dim=1)
+        self.flight_steps = torch.where(self.in_contact, torch.zeros_like(self.flight_steps), self.flight_steps + 1)
+        self.has_landed |= self.in_contact
 
         # 確認用：到達度の更新が「跳んでいる最中（どこも触れていない、または上向きに 1 m/s 以上で上昇中）」に起きた割合
         jumping = (~self.in_contact) | (self.base_lin_vel[:, 2] > 1.0)
@@ -418,9 +422,16 @@ class G1ClimbEnv:
         )
         # 一度台の上に立った後に、台から降りてしまった（両足が台から離れ、腰が台の上面近くまで下がった）
         left_box = self.succeeded & ~self.feet_on_box.any(dim=1) & (self.base_pos[:, 2] < h + tc.get("left_box_height", 0.4))
+        # 跳躍：体のどこも床や台に触れていない状態が max_flight_steps ステップ続いた
+        # （置き直した直後、最初に着地するまでは数えない）
+        max_flight = tc.get("max_flight_steps")
+        jumped = torch.zeros_like(too_low)
+        if max_flight is not None:
+            jumped = (self.flight_steps >= max_flight) & self.has_landed
         self.fell = (
             too_low
             | left_box
+            | jumped
             | (torch.abs(self.base_euler[:, 0]) > tc["max_roll"])
             | (self.base_euler[:, 1] > tc["max_pitch_forward"])
             | (self.base_euler[:, 1] < -tc["max_pitch_back"])
@@ -556,6 +567,8 @@ class G1ClimbEnv:
         self.hands_first_touch.masked_fill_(m1, False)
         self.in_contact.masked_fill_(mask, True)
         self.support_steps.masked_fill_(mask, 0)
+        self.flight_steps.masked_fill_(mask, 0)
+        self.has_landed.masked_fill_(mask, False)
         self.feet_on_box.masked_fill_(m1, False)
         self.hands_on_box.masked_fill_(m1, False)
         self.reset_buf.masked_fill_(mask, True)
@@ -603,6 +616,11 @@ class G1ClimbEnv:
         one_foot = (self.feet_on_box.sum(dim=1) == 1).to(gs.tc_float)
         other_lift = (self.feet_lift * (~self.feet_on_box).to(gs.tc_float)).sum(dim=1)
         return one_foot * other_lift
+
+    def _reward_heading(self):
+        # 台の方向（+x）から大きく向きを変える（体をひねって回り込む・回転しながら跳ぶ）のを抑える
+        yaw = self.base_euler[:, 2]
+        return torch.square((torch.abs(yaw) - self.reward_cfg.get("heading_free", 0.5)).clamp(min=0.0))
 
     def _reward_lean_back(self):
         # 後ろに大きくのけぞる姿勢（片足を台にかけたまま体を後ろに倒して踏ん張る）を抑える

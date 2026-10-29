@@ -7,7 +7,7 @@
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v5。以前の版は g1-climb, g1-climb-v2, g1-climb-v3, g1-climb-v4）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v6。以前の版は g1-climb, g1-climb-v2〜v5）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -142,6 +142,7 @@ def get_cfgs():
             "max_roll": 1.2,  # 横に倒れたとみなす角度 [rad]
             "max_pitch_forward": 0.9,  # 前に倒れたとみなす角度 [rad]（約 52 度。台に覆いかぶさる姿勢を防ぐ）
             "max_pitch_back": 1.0,  # 後ろに倒れたとみなす角度 [rad]
+            "max_flight_steps": 3,  # 体のどこも床や台に触れていない状態がこのステップ数（0.06 秒）続いたら失敗（跳躍の禁止）
             "left_box_height": 0.4,  # 台に登った後、腰が上面からこれより低くなり両足が台から離れたら失敗 [m]
         },
     }
@@ -154,6 +155,7 @@ def get_cfgs():
     reward_cfg = {
         "soft_dof_pos_limit": 0.9,
         "max_contact_force": 400.0,  # [N] これを超える接触力にペナルティ
+        "heading_free": 0.5,  # 台の方向からこの角度 [rad]（約 30 度）までの向きの変化はペナルティなし
         "hands_touch_min_height": 0.5,  # 手が台に触れた報酬は、この高さ [m] 以上の台でだけ与える
         # 1 エピソードに一度だけ（または到達度の更新時だけ）与える報酬
         "sparse_scales": {
@@ -171,6 +173,7 @@ def get_cfgs():
             "alive": 0.5,
             "trailing_foot": 1.0,  # 片足が台の上にあるとき、もう一方の足を上げた割合
             "lean_back": -2.0,  # 後ろへののけぞり
+            "heading": -2.0,  # 台の方向から heading_free [rad] 以上向きを変えた分の 2 乗
             "upright_on_top": -2.0,
             "action_rate": -0.01,
             "dof_acc": -2.5e-7,
@@ -198,7 +201,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v5", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v6", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
