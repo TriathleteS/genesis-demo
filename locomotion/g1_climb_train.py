@@ -5,7 +5,7 @@
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v2。1 回目の版は g1-climb）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -135,6 +135,7 @@ def get_cfgs():
             "max_roll": 1.2,  # 横に倒れたとみなす角度 [rad]
             "max_pitch_forward": 0.9,  # 前に倒れたとみなす角度 [rad]（約 52 度。台に覆いかぶさる姿勢を防ぐ）
             "max_pitch_back": 1.0,  # 後ろに倒れたとみなす角度 [rad]
+            "left_box_height": 0.4,  # 台に登った後、腰が上面からこれより低くなり両足が台から離れたら失敗 [m]
         },
     }
     obs_cfg = {
@@ -146,10 +147,12 @@ def get_cfgs():
     reward_cfg = {
         "soft_dof_pos_limit": 0.9,
         "max_contact_force": 400.0,  # [N] これを超える接触力にペナルティ
+        "hands_touch_min_height": 0.5,  # 手が台に触れた報酬は、この高さ [m] 以上の台でだけ与える
         # 1 エピソードに一度だけ（または到達度の更新時だけ）与える報酬
         "sparse_scales": {
             "progress": 20.0,  # 最高到達度の更新量 × 20（登り切ると合計 20）
             "success": 10.0,  # 初めて台の上に立てたとき
+            "hands_touch": 1.0,  # 手が初めて台の上に触れたとき（片手ごと）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
@@ -157,14 +160,16 @@ def get_cfgs():
         # うつ伏せにもたれかかったまま時間切れまで報酬を稼ぐ抜け道を覚えてしまう。
         # 「転ばずにいる」報酬（alive）は、前に 52 度以上傾いたら転倒とみなす判定と組み合わせて使う
         "dense_scales": {
-            "on_top": 5.0,
+            "on_top": 10.0,  # 台の上に立ち続けている間（登った後に台の上で安定して立つことを重視する）
             "alive": 1.0,
             "upright_on_top": -2.0,
             "action_rate": -0.01,
             "dof_acc": -2.5e-7,
             "dof_vel": -1e-3,
             "dof_pos_limits": -5.0,
-            "contact_force": -1e-3,
+            "contact_force": -5e-3,
+            "flight": -5.0,  # 体のどこも床や台に触れていない（跳んでいる）間
+            "lin_vel_z": -1.0,  # 胴体の上下の速さの 2 乗
         },
     }
     curriculum_cfg = {
@@ -184,7 +189,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v2", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

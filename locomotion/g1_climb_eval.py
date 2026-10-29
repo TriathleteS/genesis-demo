@@ -2,6 +2,7 @@
 
 実行方法（genesis-demo フォルダで）:
     uv run python locomotion/g1_climb_eval.py                      # 最新のチェックポイントで、高さ 0.6 m の台に挑戦
+    uv run python locomotion/g1_climb_eval.py -e g1-climb          # 1 回目の版（g1-climb）を再生する
     uv run python locomotion/g1_climb_eval.py --height 0.8         # 台の高さを変える
     uv run python locomotion/g1_climb_eval.py --ckpt 1500          # チェックポイントを指定する
     uv run python locomotion/g1_climb_eval.py --no-viewer --trials 20 --height 0.6
@@ -41,7 +42,7 @@ from g1_climb_env import G1ClimbEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v2", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--height", type=float, default=0.6, help="台の高さ [m]")
     parser.add_argument("--no-wait", action="store_true", help="Enter を待たずにすぐ始める")
@@ -130,13 +131,18 @@ def main():
             rec["active"] = False
 
     # 挑戦ごとの結果
-    results = []  # (成功したか, 登り切るまでの時間 [s])
+    results = []  # (成功したか, 登り切るまでの時間 [s], その後も台の上に立ち続けたか)
     trial = {"step": 0, "climb_time": None}
 
     def finish_trial(reason):
         ok = trial["climb_time"] is not None
-        results.append((ok, trial["climb_time"]))
-        msg = f"{trial['climb_time']:.1f} 秒で台の上に立った" if ok else f"失敗（{reason}）"
+        stayed = ok and reason == "時間切れ" and trial["on_top_at_end"]
+        results.append((ok, trial["climb_time"], stayed))
+        if ok:
+            after = "時間切れまで台の上に立っていた" if stayed else "最後は台の上に立っていなかった"
+            msg = f"{trial['climb_time']:.1f} 秒で台の上に立った（{after}）"
+        else:
+            msg = f"失敗（{reason}）"
         print(f"挑戦 {len(results)}: {msg}  最高到達度 {float(env.last_best_progress[0]):.2f}")
 
     obs_dict = env.reset()
@@ -163,6 +169,7 @@ def main():
                 if bool(env.last_just_succeeded[0]) and trial["climb_time"] is None:
                     trial["climb_time"] = trial["step"] * env.dt
                 if bool(dones[0]):
+                    trial["on_top_at_end"] = bool(env.last_on_top[0])
                     finish_trial("時間切れ" if bool(infos["time_outs"][0]) else "転倒")
                     trial.update(step=0, climb_time=None)
     except (gs.GenesisException, KeyboardInterrupt):
@@ -173,10 +180,14 @@ def main():
             print(f"録画を保存しました: {record_path}")
 
     if results:
-        n_ok = sum(ok for ok, _ in results)
-        times = [t for ok, t in results if ok]
+        n_ok = sum(ok for ok, _, _ in results)
+        n_stayed = sum(stayed for _, _, stayed in results)
+        times = [t for ok, t, _ in results if ok]
         mean_time = f"、登り切るまでの平均 {sum(times) / len(times):.1f} 秒" if times else ""
-        print(f"結果: 台の高さ {args.height:.2f} m で {len(results)} 回中 {n_ok} 回成功（{100 * n_ok / len(results):.0f}%）{mean_time}")
+        print(
+            f"結果: 台の高さ {args.height:.2f} m で {len(results)} 回中 {n_ok} 回成功（{100 * n_ok / len(results):.0f}%）"
+            f"{mean_time}。成功のうち {n_stayed} 回は時間切れまで台の上に立っていた"
+        )
 
 
 if __name__ == "__main__":
