@@ -140,6 +140,9 @@ class G1LadderEnv:
         self.feet_links_idx = [link(n) for n in env_cfg["feet_link_names"]]
         self.hands_links_idx = [link(n) for n in env_cfg["hand_link_names"]]
         self.base_link_idx = link(env_cfg["base_link_name"])
+        # 手足以外のリンク（胴体・腰・脚・腕。はしごにもたれかかる動きを抑えるのに使う）
+        limb_names = set(env_cfg["feet_link_names"]) | set(env_cfg["hand_link_names"]) | set(env_cfg.get("ankle_link_names", []))
+        self.body_links_idx = [l.idx_local for l in self.robot.links if l.name not in limb_names]
         self.robot_mass = float(self.robot.get_mass())
         self.link_masses = self.robot.get_links_mass().reshape(-1, self.robot.n_links)[0]
 
@@ -200,6 +203,7 @@ class G1LadderEnv:
         self.best_progress = torch.zeros((n,), **f)
         self.progress_gain = torch.zeros((n,), **f)
         self.on_target = torch.zeros((n,), **b)  # 目標の段に両足で立ち、手で握っている
+        self.under_ladder = torch.zeros((n,), **b)  # はしごの下にもぐり込んだ
         self.succeeded = torch.zeros((n,), **b)
         self.just_succeeded = torch.zeros((n,), **b)
         self.fell = torch.zeros((n,), **b)
@@ -454,9 +458,16 @@ class G1LadderEnv:
         self.has_landed |= self.in_contact
         jumped = (self.flight_steps >= tc["max_flight_steps"]) & self.has_landed
 
-        # 転倒：腰が低すぎる／大きく傾いた
+        # はしごの下にもぐり込んだ：足か腰が、はしごの面より向こう側に入った（v2）
+        # （v1 では、緩やかなはしごの下に足を入れてしゃがみ、低い段を握ったまま動かない動きを覚えた）
+        _, foot_n, _, _, _ = self._ladder_coords(self.feet_pos)
+        _, base_n, _, _, _ = self._ladder_coords(self.base_pos[:, None, :])
+        self.under_ladder = (foot_n < -tc.get("max_foot_behind", 0.05)).any(dim=1) | (base_n[:, 0] < 0.0)
+
+        # 転倒：腰が低すぎる／大きく傾いた／はしごの下にもぐり込んだ
         self.fell = (
             (self.base_pos[:, 2] < tc["min_base_height"])
+            | self.under_ladder
             | jumped
             | (torch.abs(self.base_euler[:, 0]) > tc["max_roll"])
             | (self.base_euler[:, 1] > tc["max_pitch_forward"])
@@ -626,6 +637,11 @@ class G1LadderEnv:
 
     def _reward_alive(self):
         return torch.ones((self.num_envs,), dtype=gs.tc_float, device=gs.device)
+
+    def _reward_body_contact(self):
+        # 手足以外（胴体・腰・脚・腕）が、はしごや床を押している力（体重比）（v2。胸をはしごにもたれかけて休む動きを抑える）
+        force = torch.norm(self.contact_forces[:, self.body_links_idx], dim=-1).sum(dim=1)
+        return force / (self.robot_mass * 9.81)
 
     def _reward_grip_strain(self):
         # 握力の限界に近い力で手を引きつけている（腕でぶら下がるより、足で体重を支えることを促す）
