@@ -191,6 +191,7 @@ class G1ClimbEnv:
         # 開始姿勢の再利用：以前の方策が到達した「登る途中・登った後」の姿勢から始めるエピソードを混ぜる
         self.height_override = torch.full((n,), float("nan"), **f)  # その環境の台の高さを固定する（nan なら段階どおり）
         self.is_replay = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)
+        self.is_review = torch.zeros((n,), dtype=gs.tc_bool, device=gs.device)  # 段階と関係なく、ランダムな高さで復習するエピソードか
         self.replay_qpos = None
         replay_file = env_cfg["reset"].get("replay_file")
         if replay_file:
@@ -514,7 +515,8 @@ class G1ClimbEnv:
 
         # カリキュラムの更新（評価時は台の高さを固定する）
         if not all_envs and self.fixed_height is None:
-            self._update_curriculum(mask & ~self.is_replay)  # 途中の姿勢から始めたエピソードは段階の更新に使わない
+            # 途中の姿勢から始めたエピソードと、復習のエピソードは段階の更新に使わない
+            self._update_curriculum(mask & ~self.is_replay & ~self.is_review)
 
         # 一部の環境は、保存しておいた「登る途中・登った後」の姿勢から始める
         rc = self.env_cfg["reset"]
@@ -526,8 +528,17 @@ class G1ClimbEnv:
             override = torch.where(replay, self.replay_height[replay_idx], torch.full_like(self.box_height, float("nan")))
         else:
             override = torch.full_like(self.box_height, float("nan"))
+        # 一部の環境は、段階と関係なく 0.1〜1.0 m のランダムな高さで練習する（v8b。低い台の登り方を忘れないように）
+        cc = self.curriculum_cfg
+        review = torch.zeros_like(mask)
+        if self.fixed_height is None and cc.get("review_prob", 0.0) > 0.0:
+            review = mask & ~replay & (torch.rand((self.num_envs,), device=gs.device) < cc["review_prob"])
+            review_levels = torch.randint(0, self.num_levels, (self.num_envs,), device=gs.device)
+            review_height = cc["height_min"] + review_levels.to(gs.tc_float) * cc["height_step"]
+            override = torch.where(review, review_height, override)
         self.height_override = torch.where(mask, override, self.height_override)
         self.is_replay = torch.where(mask, replay, self.is_replay)
+        self.is_review = torch.where(mask, review, self.is_review)
         self._update_box_height(None if all_envs else mask)
         heights = self.curriculum_cfg["height_min"] + self.levels.to(gs.tc_float) * self.curriculum_cfg["height_step"]
         self.extras["episode"]["Curriculum/mean_height"] = heights.mean()
