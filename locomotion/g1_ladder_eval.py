@@ -8,7 +8,7 @@
                                                                    # 画面なしで 20 回挑戦し、成功率を表示する
     uv run python locomotion/g1_ladder_eval.py --record            # videos/ に録画する
 
-1 回の挑戦は最大 15 秒。転倒するか 15 秒たつと、自動ではしごの手前に戻って次の挑戦を始める。
+1 回の挑戦は最大 15 秒。転倒するか、15 秒たつか、4 秒間進まなかった（停滞）と、自動ではしごの手前に戻って次の挑戦を始める。
 成功：両足が下から 3 段目以上の横棒に乗り、少なくとも片手で横棒を握っている。
 
 ビューアー上のキー操作:
@@ -42,7 +42,7 @@ from g1_ladder_env import G1LadderEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v4", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v5", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--angle", type=float, default=75.0, help="はしごの傾き（床からの角度）[deg]")
     parser.add_argument("--no-wait", action="store_true", help="Enter を待たずにすぐ始める")
@@ -88,7 +88,7 @@ def main():
     print(f"チェックポイント model_{args.ckpt}.pt を読み込みます。")
 
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
-    runner.load(os.path.join(log_dir, f"model_{args.ckpt}.pt"))
+    runner.load(os.path.join(log_dir, f"model_{args.ckpt}.pt"), map_location=gs.device)
     policy = runner.get_inference_policy(device=gs.device)
 
     # 開始・一時停止・やり直し
@@ -171,7 +171,13 @@ def main():
                     trial["climb_time"] = trial["step"] * env.dt
                 if bool(dones[0]):
                     trial["on_top_at_end"] = bool(env.last_on_target[0])
-                    finish_trial("時間切れ" if bool(infos["time_outs"][0]) else "転倒")
+                    if bool(infos["time_outs"][0]):
+                        reason = "時間切れ"
+                    elif bool(getattr(env, "last_stalled", torch.zeros(1, dtype=torch.bool))[0]):
+                        reason = "停滞：4 秒間進まなかった"
+                    else:
+                        reason = "転倒"
+                    finish_trial(reason)
                     trial.update(step=0, climb_time=None)
     except (gs.GenesisException, KeyboardInterrupt):
         pass

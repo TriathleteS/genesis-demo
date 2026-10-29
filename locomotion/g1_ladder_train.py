@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v4。以前の版は g1-ladder, g1-ladder-v2, g1-ladder-v3）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v5。以前の版は g1-ladder, g1-ladder-v2〜v4）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -183,6 +183,9 @@ def get_cfgs():
             "max_roll": 1.0,
             "max_pitch_forward": 1.0,
             "max_pitch_back": 0.8,  # 後ろに倒れた（はしごから体が離れた）とみなす角度 [rad]
+            # 到達度の最高記録も足の段もこの時間 [s] 更新されず、目標の段にもいなければ打ち切る（減点はしない。v5）
+            # （v4 では、横棒を握ったまま床に立ち続ける・1 段目に立ったまま止まる動きで時間切れまで過ごしていた）
+            "stall_time_s": 4.0,
             "max_flight_steps": 5,  # 体のどこも触れず、握ってもいない状態が 0.1 秒続いたら失敗（跳躍の禁止）
             # 足がはしごの面よりこの距離 [m] 以上向こう側に入るか、腰がはしごの面より向こう側に入ったら失敗（v2。はしごの下にもぐり込む動きの禁止）
             "max_foot_behind": 0.05,
@@ -202,12 +205,13 @@ def get_cfgs():
             "progress": 20.0,  # 最高到達度の更新量 × 20（目標まで登ると合計 20）
             "success": 10.0,  # 初めて目標の段に立てたとき
             "first_grip": 2.0,  # 高い段の横棒を初めて握ったとき（片手ごと）
+            "new_rung": 3.0,  # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
         "dense_scales": {
             "on_target": 10.0,  # 目標の段に立ち、握り続けている間
-            "alive": 0.2,  # v1 の 0.5 では、転ばずにじっとしているだけで得をしたので下げる（v2）
+            "alive": 0.0,  # v1 の 0.5・v2〜v4 の 0.2 では、転ばずにじっとしているだけで得をしたので 0 に（v5）
             "body_contact": -5.0,  # 手足以外がはしごや床を押す力（体重比）。v1 では胸を緩やかなはしごにもたれかけて休んでいた（v2）
             "grip_strain": -0.5,  # 握力の限界に近い力で引きつけている（腕だけでぶら下がる動きを抑える）
             "flight": -5.0,
@@ -239,7 +243,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v4", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v5", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

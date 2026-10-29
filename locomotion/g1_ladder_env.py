@@ -180,6 +180,10 @@ class G1LadderEnv:
         self.rew_buf = torch.zeros((n,), **f)
         self.reset_buf = torch.ones((n,), **b)
         self.time_out_buf = torch.zeros((n,), **b)
+        self.stalled = torch.zeros((n,), **b)  # 到達度が長い間更新されず、打ち切った（v5）
+        self.stall_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 到達度の最高記録が更新されていないステップ数
+        self.feet_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各足が乗った最高の段
+        self.new_rungs = torch.zeros((n,), **f)  # 今のステップで、足が初めて乗った段の数（v5）
         self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
 
         # はしごの状態（環境ごと）
@@ -384,7 +388,7 @@ class G1LadderEnv:
 
         # 終了判定
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf = self.time_out_buf | self.fell | self.scene.rigid_solver.get_error_envs_mask()
+        self.reset_buf = self.time_out_buf | self.fell | self.stalled | self.scene.rigid_solver.get_error_envs_mask()
 
         # 報酬
         self.rew_buf.zero_()
@@ -398,6 +402,7 @@ class G1LadderEnv:
         self.last_best_progress = self.best_progress.clone()
         self.last_just_succeeded = self.just_succeeded.clone()
         self.last_on_target = self.on_target.clone()
+        self.last_stalled = self.stalled.clone()
         self._reset_idx(self.reset_buf)
         self._update_observation()
 
@@ -464,6 +469,21 @@ class G1LadderEnv:
         self.best_progress = torch.where(fresh_hang, self.progress, self.best_progress)
         self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
         self.best_progress = torch.maximum(self.best_progress, self.progress)
+
+        # 段ごとの報酬（v5）：足がこのエピソードで初めて 1 つ上の段に乗るたびに数える（最高記録の更新だけ）
+        # 途中の姿勢から始めた直後は、そのときの段を基準にする
+        self.feet_best_rung = torch.where(fresh_hang[:, None], self.feet_rung_idx, self.feet_best_rung)
+        higher = (self.feet_rung_idx - self.feet_best_rung).clamp(min=0)
+        self.new_rungs = higher.sum(dim=1).to(gs.tc_float)
+        self.feet_best_rung = torch.maximum(self.feet_best_rung, self.feet_rung_idx)
+
+        # じっとしたら打ち切り（v5）：到達度の最高記録も足の段も stall_time_s 秒更新されず、目標の段にもいない
+        improved = (self.progress_gain > 1e-4) | (self.new_rungs > 0)
+        self.stall_steps = torch.where(improved, torch.zeros_like(self.stall_steps), self.stall_steps + 1)
+        stall_limit = tc.get("stall_time_s")
+        self.stalled = torch.zeros_like(self.stalled)
+        if stall_limit is not None:
+            self.stalled = (self.stall_steps * self.dt > stall_limit) & ~self.on_target
 
         # 目標の段に立っているか：両足が目標の段以上の横棒に乗り、少なくとも片手で握っている
         k_target = tc["target_rung"]
@@ -678,6 +698,10 @@ class G1LadderEnv:
         self.feet_rung_idx.masked_fill_(m1, -1)
         self.in_contact.masked_fill_(mask, True)
         self.support_steps.masked_fill_(mask, 0)
+        self.stall_steps.masked_fill_(mask, 0)
+        self.stalled.masked_fill_(mask, False)
+        self.new_rungs.masked_fill_(mask, 0.0)
+        self.feet_best_rung.masked_fill_(m1, -1)
         self.flight_steps.masked_fill_(mask, 0)
         self.reset_buf.masked_fill_(mask, True)
 
@@ -698,6 +722,10 @@ class G1LadderEnv:
 
     def _reward_success(self):
         return self.just_succeeded.to(gs.tc_float)
+
+    def _reward_new_rung(self):
+        # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
+        return self.new_rungs
 
     def _reward_first_grip(self):
         # 高い段の横棒を初めて握ったとき（片手ごとに一度だけ）
