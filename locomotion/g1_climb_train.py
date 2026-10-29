@@ -7,7 +7,7 @@
     uv run python locomotion/g1_climb_train.py --resume 2999 --max-iterations 1000
                                                                        # model_2999.pt から 1000 イテレーション続ける
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v6。以前の版は g1-climb, g1-climb-v2〜v5）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-climb-v7。以前の版は g1-climb, g1-climb-v2〜v6）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -127,9 +127,12 @@ def get_cfgs():
         # タスクの判定
         "task": {
             "stand_height": 0.78,  # 立っているときの腰の高さ [m]
-            # 到達度の内訳：足を上げた高さ・全身の重心の上がった割合・台に乗った足の数
+            # 到達度の内訳：足を上げた高さ・全身の重心の上がった割合・台に乗った足の数・重心が台の上へ前進した割合
             # （足を上げた高さは最初の手がかり。これがないと台に近づく理由がなく、何もしないまま学習が止まる）
-            "progress_weights": (0.15, 0.6, 0.25),
+            # （重心の前進は v7 で追加。片足を台に乗せたまま、台の手前で踏ん張り続けるのを防ぐ）
+            "progress_weights": (0.1, 0.5, 0.2, 0.2),
+            "com_fwd_start": -0.3,  # 重心の前進を数え始める位置 [m]（台の正面が x = 0。台の手前に立っているときの重心の位置）
+            "com_fwd_target": 0.2,  # 重心がここまで台の上に進めば前進の割合が 1 [m]
             "foot_near_box_x": 0.3,  # 台の正面からこの距離 [m] 以内の足だけ「足を上げた高さ」に数える
             "stand_com_height": 0.68,  # 立っているときの全身の重心の高さ [m]
             "support_min_steps": 5,  # 手か足が台に触れ続けてこのステップ数（0.1 秒）たってから重心の高さを数える
@@ -173,7 +176,7 @@ def get_cfgs():
             "alive": 0.5,
             "trailing_foot": 1.0,  # 片足が台の上にあるとき、もう一方の足を上げた割合
             "lean_back": -2.0,  # 後ろへののけぞり
-            "heading": -2.0,  # 台の方向から heading_free [rad] 以上向きを変えた分の 2 乗
+            "heading": 0.0,  # 無効（v6 では跳躍を失敗にしたので不要と判断）。使うときは -2.0 など：台の方向から heading_free [rad] 以上向きを変えた分の 2 乗
             "upright_on_top": -2.0,
             "action_rate": -0.01,
             "dof_acc": -2.5e-7,
@@ -185,11 +188,12 @@ def get_cfgs():
         },
     }
     curriculum_cfg = {
-        # 台の高さの段階：0.2 m から 1.0 m まで 0.05 m 刻み
-        "height_min": 0.2,
+        # 台の高さの段階：0.1 m から 1.0 m まで 0.05 m 刻み
+        # （v7 で下限を 0.2 m から 0.1 m に下げた。0.1 m なら歩いて乗れるので、両足で台に乗る経験から始められる）
+        "height_min": 0.1,
         "height_max": 1.0,
         "height_step": 0.05,
-        "init_max_level": 4,  # 最初は 0.2〜0.4 m からランダムに始める
+        "init_max_level": 4,  # 最初は 0.1〜0.3 m からランダムに始める
         "level_down_progress": 0.5,  # 最高到達度がこれ未満で終わったら段階を下げる
         "top_levels_resample": 5,  # 最上段を超えた環境は、上から 5 段の中で選び直す
         # 補助の力：手か足が台の上に触れている間、体重 × assist_init の上向きの力を腰にかける
@@ -201,7 +205,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v6", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-climb-v7", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
