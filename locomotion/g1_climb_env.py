@@ -380,8 +380,16 @@ class G1ClimbEnv:
         self.feet_lift = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
         near_box = (self.feet_pos[:, :, 0] > -tc.get("foot_near_box_x", 0.3)).to(gs.tc_float)
         p_lift = (self.feet_lift * near_box).max(dim=1).values
+        # 重心が台の上へ前進した割合（v7）：重心の水平位置が com_fwd_start から com_fwd_target まで進めば 1。
+        #   重心の高さと同じく、台に触れ続けていて跳んでいないときだけ数える（台に乗るには、まず重心を台の上の足へ運ぶ必要がある）
+        p_fwd = (
+            (self.com_pos[:, 0] - tc.get("com_fwd_start", -0.3))
+            / (tc.get("com_fwd_target", 0.2) - tc.get("com_fwd_start", -0.3))
+        ).clamp(0.0, 1.0) * steady
         w = tc["progress_weights"]
-        if len(w) == 3:
+        if len(w) == 4:
+            self.progress = w[0] * p_lift + w[1] * p_com + w[2] * p_feet + w[3] * p_fwd
+        elif len(w) == 3:
             self.progress = w[0] * p_lift + w[1] * p_com + w[2] * p_feet
         else:
             self.progress = w[0] * p_com + w[1] * p_feet
