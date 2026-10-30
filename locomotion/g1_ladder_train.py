@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v13b。以前の版は g1-ladder, g1-ladder-v2〜v13）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v13c。以前の版は g1-ladder, g1-ladder-v2〜v13b）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -140,9 +140,11 @@ def get_cfgs():
             # 横棒が手のひら側にあるときだけ握れる（v13）：手のひらの中心点から横棒の中心線への向きと、手のひらの向き（手の部品の
             # 座標の -z、指が曲がる側）がなす角の cos がこれより大きいとき（0.5 = 60° 以内）。v12 までは手の甲や側面でも握れた
             "palm_facing_cos": 0.5,
-            # 横棒を上から握るときだけ握れる（v13b）：手のひらの向きと真下のなす角の cos がこれより大きいとき（0.5 = 60° 以内）。
-            # v13 では握る瞬間の約半分が、手のひらを上に向けて横棒を下からつかんでいた
-            "palm_down_cos": 0.5,
+            # 手のひらを上に向けて横棒を下からつかむ握り方を禁止：手のひらの向きと真下のなす角の cos がこれより大きいときだけ握れる。
+            # v13 では握る瞬間の約半分が下からつかんでいた。v13b は 0.5（真下から 60° 以内＝上から握る）にしたが、G1 の手首は
+            # 回転 1 軸だけなので、腕を頭上に上げると手のひらを下に向けられず、頭より上の段を握れなかった（ぶら下がり開始は全滅）。
+            # v13c で -0.5（真上から 60° 以内でなければよい）に緩め、手のひらを前（水平）に向けて握ることも許す
+            "palm_down_cos": -0.5,
             # 握っている間、手のひらの向きと握った横棒への向きのなす角の cos がこれ未満になったら外れる（v13b。0.0 = 90°）。
             # v13 では握った後に手首を回し、握っている時間の 9 割近くで手の甲や側面を横棒に当てていた
             "palm_release_cos": 0.0,
@@ -274,7 +276,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v13b", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v13c", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
