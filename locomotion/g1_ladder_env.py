@@ -67,9 +67,9 @@ class G1LadderEnv:
             ),
             vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
             viewer_options=gs.options.ViewerOptions(
-                camera_pos=(-1.6, -2.6, 1.8),
-                camera_lookat=(0.0, 0.0, 1.0),
-                camera_fov=45,
+                camera_pos=(-1.8, -2.8, 2.5),  # v11a：高い段まで映るように引いて、見る点を上げた
+                camera_lookat=(0.0, 0.0, 1.7),
+                camera_fov=50,
             ),
             show_viewer=show_viewer,
         )
@@ -108,7 +108,7 @@ class G1LadderEnv:
         self.camera = None
         if camera_res is not None:
             self.camera = self.scene.add_camera(
-                res=camera_res, pos=(-1.6, -2.6, 1.8), lookat=(0.0, 0.0, 1.0), fov=45, GUI=False, env_idx=0
+                res=camera_res, pos=(-1.8, -2.8, 2.5), lookat=(0.0, 0.0, 1.7), fov=50, GUI=False, env_idx=0
             )
 
         self.scene.build(n_envs=num_envs)
@@ -440,6 +440,11 @@ class G1LadderEnv:
         self.palm_rung_dist, self.palm_rung_idx = dmin, kmin
         command = self.actions[:, self.num_joints :] > 0.0
         within = (dmin < gc["grab_distance"]) & (torch.abs(self.palms_pos[:, :, 1]) < lc["rung_width"] / 2)
+        # v11a：手が実際に何かに触れているときだけ握れる（触れていないものは握れない。握った位置は今の手のひらの位置のまま）
+        min_contact = gc.get("min_contact_force")
+        if min_contact is not None:
+            hand_force = torch.norm(self.contact_forces[:, self.hands_links_idx], dim=-1)
+            within &= hand_force > min_contact
         new_grip = command & within & ~self.grip
         # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
         self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
