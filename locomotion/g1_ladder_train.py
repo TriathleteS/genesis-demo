@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v7。以前の版は g1-ladder, g1-ladder-v2〜v6）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v8。以前の版は g1-ladder, g1-ladder-v2〜v7）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -43,7 +43,8 @@ def get_train_cfg(exp_name):
             "desired_kl": 0.01,
             # よじ登り（v5〜v9）では 0.01 で行動のばらつきが増え続けた。はしご v1 の 0.003 では逆に
             # 800 イテレーションで 0.39 まで下がり、試行錯誤が止まったので、その間の 0.005 にする（v2）
-            "entropy_coef": 0.005,
+            # v8：v5〜v7 で行動のばらつきが 1.5〜1.7 まで増え続けたので、0.003 に戻す（動き方を覚えたモデルからの続きなので）
+            "entropy_coef": 0.003,
             "gamma": 0.99,
             "lam": 0.95,
             "learning_rate": 0.001,
@@ -170,7 +171,9 @@ def get_cfgs():
         "task": {
             "target_rung": 2,  # 両足でこの段（下から 3 段目、はしごに沿って 0.75 m）以上に立てたら成功
             # 到達度の内訳：横棒への手の近さ・握った手の高さ・重心の上がった割合・横棒に乗った足の高さ
-            "progress_weights": (0.05, 0.2, 0.5, 0.25),
+            # v8 で「手で握っている間に足を持ち上げた高さ」（重み 0.15）を加え、重心の高さ 0.5 → 0.4、足の段 0.25 → 0.2 に
+            "progress_weights": (0.05, 0.2, 0.4, 0.2, 0.15),
+            "foot_rest_height": 0.035,  # 床に立っているときの足のリンク（足首）の高さ [m]
             "reach_distance": 0.5,  # 手のひらが横棒からこの距離 [m] 以内に近づくと「手の近さ」が増え始める
             "grip_height_above_target": 1.0,  # 握った手の高さが「目標の段の高さ + これ」で 1 [m]
             "first_grip_min_height": 0.7,  # この高さ [m] 以上の横棒を初めて握ったときだけ報酬
@@ -248,7 +251,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v7", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v8", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

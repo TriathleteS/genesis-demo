@@ -494,6 +494,12 @@ class G1LadderEnv:
         p_reach = (1.0 - self.palm_rung_dist.min(dim=1).values / tc["reach_distance"]).clamp(0.0, 1.0)
         w = tc["progress_weights"]
         self.progress = w[0] * p_reach + w[1] * p_grip + w[2] * p_com + w[3] * p_feet
+        if len(w) >= 5:
+            # 足を持ち上げた高さ（v8）：手で握っている間に、足（足首）を床から持ち上げた高さ。目標の段の高さで 1（頭打ち）。
+            # 足が次の段に実際に乗る前の「足を上へ運ぶ途中」にも手がかりを与える
+            foot_up = ((self.feet_pos[:, :, 2] - tc["foot_rest_height"]) / h[:, None].clamp(min=0.05)).clamp(0.0, 1.0)
+            p_lift = foot_up.max(dim=1).values * self.grip.any(dim=1).to(gs.tc_float)
+            self.progress = self.progress + w[4] * p_lift
         # ぶら下がった姿勢から始めたエピソードは、始めた時点の到達度を基準にする（何もせずに報酬が出ないように）
         fresh_hang = self.is_hang & (self.episode_length_buf <= 1)
         self.best_progress = torch.where(fresh_hang, self.progress, self.best_progress)
