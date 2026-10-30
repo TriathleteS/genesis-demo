@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v6。以前の版は g1-ladder, g1-ladder-v2〜v5）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v7。以前の版は g1-ladder, g1-ladder-v2〜v6）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -182,6 +182,7 @@ def get_cfgs():
             #   前後：足首が横棒の真上から、足の裏の長さの分だけ手前まで（つま先側を横棒に掛けている）
             "foot_on_rung": {"dz_min": 0.03, "dz_max": 0.10, "dx_min": -0.16, "dx_max": 0.06},
             "foot_hold_time_s": 0.2,  # 段ごとの報酬は、足が同じ段にこの時間 [s] 以上乗り続けてから数える（v6）
+            "foot_below_base": 0.35,  # 段ごとの報酬は、腰よりこの距離 [m] 以上低い段だけ数える（v7。手の高さまで足を蹴り上げて掛ける動きを数えない）
             "min_base_height": 0.4,  # 腰がこれより低くなったら転倒 [m]
             "max_roll": 1.0,
             "max_pitch_forward": 1.0,
@@ -209,6 +210,7 @@ def get_cfgs():
             "success": 10.0,  # 初めて目標の段に立てたとき
             "first_grip": 2.0,  # 高い段の横棒を初めて握ったとき（片手ごと）
             "new_rung": 3.0,  # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
+            "new_hand_rung": 2.0,  # 片手がこのエピソードで初めて 1 つ上の段を握ったとき（もう一方の手か両足で体を支えているときだけ。v7）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
@@ -246,7 +248,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v6", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v7", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
