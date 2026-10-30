@@ -1,8 +1,8 @@
 """学習済みの G1 はしご登り方策を再生・評価するスクリプト。
 
 実行方法（genesis-demo フォルダで）:
-    uv run python locomotion/g1_ladder_eval.py                     # 最新のチェックポイントで、傾き 75° のはしごに挑戦
-    uv run python locomotion/g1_ladder_eval.py --angle 90          # はしごの傾きを変える（学習は 70〜90°）
+    uv run python locomotion/g1_ladder_eval.py                     # 最新のチェックポイントで、傾き 85° のはしごに挑戦
+    uv run python locomotion/g1_ladder_eval.py --angle 90          # はしごの傾きを変える（学習は 80〜90°）
     uv run python locomotion/g1_ladder_eval.py --ckpt 1500         # チェックポイントを指定する
     uv run python locomotion/g1_ladder_eval.py --no-viewer --trials 20 --angle 75
                                                                    # 画面なしで 20 回挑戦し、成功率を表示する
@@ -48,9 +48,9 @@ from g1_ladder_env import G1LadderEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v9", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v10", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
-    parser.add_argument("--angle", type=float, default=75.0, help="はしごの傾き（床からの角度）[deg]")
+    parser.add_argument("--angle", type=float, default=85.0, help="はしごの傾き（床からの角度）[deg]")
     parser.add_argument(
         "--start", choices=["ground", "hang", "stand"], default="ground",
         help="開始の仕方（ground：床から、hang：ぶら下がった姿勢から、stand：床に立って握った姿勢から）",

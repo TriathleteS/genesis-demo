@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v9。以前の版は g1-ladder, g1-ladder-v2〜v8）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v10。以前の版は g1-ladder, g1-ladder-v2〜v9）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -236,12 +236,14 @@ def get_cfgs():
         },
     }
     curriculum_cfg = {
-        # はしごの傾き [deg]：70° から 90°（垂直）まで 2.5° 刻み
+        # はしごの傾き [deg]：80° から 90°（垂直）まで 2.5° 刻み
         # （v3 までは 60° から。60° では横棒が前に遠く、手で握りにくい。床からの開始は 60° のまま一度も登れなかった）
-        "angle_min": 70.0,
+        # （v4〜v9 は 70° から。g1_ladder_pose_check.py で、片足で立ってもう一方の足を上げる姿勢を保てるのは 80〜90° が中心で、
+        #   70° では保てる姿勢が見つからず、75° はぎりぎりだった。学習の大半がその 72° 前後で行われていたので、v10 で 80° からに）
+        "angle_min": 80.0,
         "angle_max": 90.0,
         "angle_step": 2.5,
-        "init_max_level": 2,  # 最初は 70〜75° からランダムに始める
+        "init_max_level": 2,  # 最初は 80〜85° からランダムに始める
         "level_down_progress": 0.3,  # 最高到達度がこれ未満で終わったら段階を下げる
         "top_levels_resample": 4,  # 最上段を超えた環境は、上から 4 段の中で選び直す
         "review_prob": 0.2,  # エピソードの 2 割は、段階と関係なくランダムな傾きで練習する（段階の更新には使わない）
@@ -254,7 +256,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v9", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v10", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
