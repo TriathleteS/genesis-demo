@@ -183,6 +183,8 @@ class G1LadderEnv:
         self.stalled = torch.zeros((n,), **b)  # 到達度が長い間更新されず、打ち切った（v5）
         self.stall_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 到達度の最高記録が更新されていないステップ数
         self.feet_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各足が乗った最高の段
+        self.feet_hold_steps = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 各足が同じ段に乗り続けているステップ数（v6）
+        self.feet_prev_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)
         self.new_rungs = torch.zeros((n,), **f)  # 今のステップで、足が初めて乗った段の数（v5）
         self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
 
@@ -441,12 +443,21 @@ class G1LadderEnv:
         tc = self.env_cfg["task"]
         h = self.target_height
 
-        # 足が横棒に乗っているか：床から離れていて、横棒の近くにあり、力がかかっている
+        # 足が横棒に乗っているか（v6 で厳しくした）：足の裏が横棒の上面の高さにあり、横棒の上に足が掛かっていて、
+        # 力がかかっている。v5 までは「横棒の近くで何かに触れている」だけで数えていたため、足を高く蹴り上げて
+        # 横棒に下や横から当てるだけで「乗った」ことになっていた
         feet_force = torch.norm(self.contact_forces[:, self.feet_links_idx], dim=-1)
-        _, _, fk, fd, _ = self._ladder_coords(self.feet_pos)
-        self.feet_on_rung = (
-            (self.feet_pos[:, :, 2] > tc["foot_off_floor_height"]) & (fd < tc["foot_rung_distance"]) & (feet_force > 5.0)
+        rung_pos = self.rung_s[None, :, None] * self.ladder_u[:, None, :]  # [n, 段, 3]
+        dz = self.feet_pos[:, :, None, 2] - rung_pos[:, None, :, 2]  # [n, 足, 段]：足のリンクの原点と横棒の中心の高さの差
+        dx = self.feet_pos[:, :, None, 0] - rung_pos[:, None, :, 0]  # 足のリンクの原点（足首）と横棒の前後の差
+        fw = tc["foot_on_rung"]
+        on = (
+            (dz > fw["dz_min"]) & (dz < fw["dz_max"]) & (dx > fw["dx_min"]) & (dx < fw["dx_max"])
+            & (torch.abs(self.feet_pos[:, :, None, 1]) < self.env_cfg["ladder"]["rung_width"] / 2)
+            & (feet_force[:, :, None] > 5.0)
         )
+        self.feet_on_rung = on.any(dim=-1)
+        fk = on.to(torch.int64).argmax(dim=-1)
         self.feet_rung_idx = torch.where(self.feet_on_rung, fk, torch.full_like(fk, -1))
 
         # 到達度（0〜1）：重心の高さ・横棒に乗った足の高さ・握った手の高さ・横棒への手の近さ
@@ -473,9 +484,18 @@ class G1LadderEnv:
         # 段ごとの報酬（v5）：足がこのエピソードで初めて 1 つ上の段に乗るたびに数える（最高記録の更新だけ）
         # 途中の姿勢から始めた直後は、そのときの段を基準にする
         self.feet_best_rung = torch.where(fresh_hang[:, None], self.feet_rung_idx, self.feet_best_rung)
-        higher = (self.feet_rung_idx - self.feet_best_rung).clamp(min=0)
-        self.new_rungs = higher.sum(dim=1).to(gs.tc_float)
-        self.feet_best_rung = torch.maximum(self.feet_best_rung, self.feet_rung_idx)
+        # v6：同じ段に foot_hold_time_s 秒以上乗り続けてから数える（足を蹴り上げて一瞬だけ高い段に掛ける動きを数えない）。
+        # 1 回の更新で数えるのは 1 段まで（床から一気に高い段に足を掛けても 1 段分）
+        same = (self.feet_rung_idx == self.feet_prev_rung) & (self.feet_rung_idx >= 0)
+        self.feet_hold_steps = torch.where(same, self.feet_hold_steps + 1, torch.zeros_like(self.feet_hold_steps))
+        self.feet_prev_rung = self.feet_rung_idx.clone()
+        held_rung = torch.where(
+            self.feet_hold_steps * self.dt >= tc.get("foot_hold_time_s", 0.0), self.feet_rung_idx,
+            torch.full_like(self.feet_rung_idx, -1),
+        )
+        higher = (held_rung > self.feet_best_rung).to(gs.tc_float)
+        self.new_rungs = higher.sum(dim=1)
+        self.feet_best_rung = torch.maximum(self.feet_best_rung, held_rung)
 
         # じっとしたら打ち切り（v5）：到達度の最高記録も足の段も stall_time_s 秒更新されず、目標の段にもいない
         improved = (self.progress_gain > 1e-4) | (self.new_rungs > 0)
@@ -702,6 +722,8 @@ class G1LadderEnv:
         self.stalled.masked_fill_(mask, False)
         self.new_rungs.masked_fill_(mask, 0.0)
         self.feet_best_rung.masked_fill_(m1, -1)
+        self.feet_hold_steps.masked_fill_(m1, 0)
+        self.feet_prev_rung.masked_fill_(m1, -1)
         self.flight_steps.masked_fill_(mask, 0)
         self.reset_buf.masked_fill_(mask, True)
 
