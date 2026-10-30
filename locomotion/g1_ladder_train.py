@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v11a。以前の版は g1-ladder, g1-ladder-v2〜v10）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v12。以前の版は g1-ladder, g1-ladder-v2〜v11a）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -250,6 +250,11 @@ def get_cfgs():
         "level_down_progress": 0.3,  # 最高到達度がこれ未満で終わったら段階を下げる
         "top_levels_resample": 4,  # 最上段を超えた環境は、上から 4 段の中で選び直す
         "review_prob": 0.2,  # エピソードの 2 割は、段階と関係なくランダムな傾きで練習する（段階の更新には使わない）
+        # 目標の段のカリキュラム（v12）：床からの開始の目標を下から 3 段目から始め、成功するたびに 1 段上げる（上限は task.target_rung）。
+        # 最高到達度が target_down_progress 未満で終わったら 1 段下げる。ぶら下がり・床に立って握った姿勢からの開始は常に上限の段が目標
+        # （v11a でいきなり 6 段目を目標にしたら、床からの開始は v10 の目標だった 3 段目で止まったまま抜け出せなかった）
+        "target_init": 2,
+        "target_down_progress": 0.5,
         # 補助の力：はしごに手か足が掛かっている間、体重 × assist_init の上向きの力を腰にかける
         "assist_init": 0.4,
         "assist_anneal_steps": 1500 * 24,  # 1500 イテレーションかけて 0 まで下げる
@@ -259,7 +264,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v11a", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v12", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

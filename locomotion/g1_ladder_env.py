@@ -197,6 +197,10 @@ class G1LadderEnv:
         self.ladder_u = torch.zeros((n, 3), **f)  # はしごに沿った上向きの単位ベクトル
         self.ladder_nrm = torch.zeros((n, 3), **f)  # はしごの面に垂直で、ロボットの側を向く単位ベクトル
         self.target_height = torch.ones((n,), **f)  # 目標の段の高さ [m]
+        # 目標の段のカリキュラム（v12）：環境ごとの目標の段。床からの開始で成功したら 1 段上げ、ほとんど進めなければ 1 段下げる
+        k_max = env_cfg["task"]["target_rung"]
+        self.target_rung_env = torch.full((n,), curriculum_cfg.get("target_init", k_max), dtype=torch.int64, device=gs.device)
+        self.episode_target = torch.full((n,), k_max, dtype=torch.int64, device=gs.device)  # 今のエピソードの目標の段
 
         # 握る
         self.grip = torch.zeros((n, 2), **b)  # 握っているか（左右）
@@ -304,8 +308,7 @@ class G1LadderEnv:
         zero = torch.zeros_like(c)
         self.ladder_u = torch.stack((c, zero, s), dim=1)
         self.ladder_nrm = torch.stack((-s, zero, c), dim=1)
-        k_target = self.env_cfg["task"]["target_rung"]
-        self.target_height = self.rung_s[k_target] * s
+        self.target_height = self.rung_s[self.episode_target] * s
         for k, rung in enumerate(self.rungs):
             rung.set_pos(self.rung_s[k] * self.ladder_u)
 
@@ -334,6 +337,13 @@ class G1LadderEnv:
             max(0, self.num_levels - cc["top_levels_resample"]), self.num_levels, (self.num_envs,), device=gs.device
         )
         self.levels = torch.where(over, random_levels, self.levels).clamp(min=0)
+        # 目標の段（v12）：成功したら 1 段上げ（上限は task.target_rung）、目標の段にほど遠ければ 1 段下げる
+        if "target_init" in cc:
+            k_max = self.env_cfg["task"]["target_rung"]
+            t_up = up & (self.episode_target == self.target_rung_env)
+            t_down = envs_idx & ~self.succeeded & (self.best_progress < cc.get("target_down_progress", 0.5))
+            self.target_rung_env = torch.where(t_up, (self.target_rung_env + 1).clamp(max=k_max), self.target_rung_env)
+            self.target_rung_env = torch.where(t_down, (self.target_rung_env - 1).clamp(min=cc["target_init"]), self.target_rung_env)
         n_done = envs_idx.sum()
         rate = torch.where(n_done > 0, (envs_idx & self.succeeded).sum() / n_done.clamp(min=1), self.success_rate_ema)
         self.success_rate_ema = 0.99 * float(self.success_rate_ema) + 0.01 * float(rate)
@@ -552,9 +562,8 @@ class G1LadderEnv:
             self.stalled = (self.stall_steps * self.dt > stall_limit) & ~self.on_target
 
         # 目標の段に立っているか：両足が目標の段以上の横棒に乗り、少なくとも片手で握っている
-        k_target = tc["target_rung"]
         self.on_target = (
-            self.feet_on_rung.all(dim=1) & (self.feet_rung_idx >= k_target).all(dim=1) & self.grip.any(dim=1)
+            self.feet_on_rung.all(dim=1) & (self.feet_rung_idx >= self.episode_target[:, None]).all(dim=1) & self.grip.any(dim=1)
         )
         self.just_succeeded = self.on_target & ~self.succeeded
         self.succeeded |= self.on_target
@@ -657,6 +666,7 @@ class G1LadderEnv:
         self.extras["episode"]["Curriculum/max_angle"] = angles.max()
         self.extras["episode"]["Curriculum/assist"] = torch.tensor(self.assist_scale)
         self.extras["episode"]["Curriculum/success_rate"] = torch.tensor(self.success_rate_ema)
+        self.extras["episode"]["Curriculum/mean_target_rung"] = (self.target_rung_env + 1).to(gs.tc_float).mean()  # 下から数えた段
 
         # ロボットをはしごの手前に置き直す
         rc = self.env_cfg["reset"]
@@ -733,6 +743,14 @@ class G1LadderEnv:
             _, _, _, d_anchor, _ = self._ladder_coords(stand_anchor)
             stand_grip = stand[:, None] & (d_anchor < self.env_cfg["grip"]["grab_distance"])
         self.is_hang = torch.where(mask, hang | stand, self.is_hang)
+        # 今のエピソードの目標の段：床からの開始は環境ごとの目標の段、ぶら下がり・床に立って握った姿勢からの開始と
+        # 評価のときは一番上の目標（task.target_rung）
+        k_max = self.env_cfg["task"]["target_rung"]
+        ep_target = torch.where(self.is_hang, torch.full_like(self.target_rung_env, k_max), self.target_rung_env)
+        if self.fixed_angle is not None:
+            ep_target = torch.full_like(self.target_rung_env, k_max)
+        self.episode_target = torch.where(mask, ep_target, self.episode_target)
+        self.target_height = self.rung_s[self.episode_target] * torch.sin(self.ladder_angle)
         qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
         self.robot.set_qpos(qpos, zero_velocity=False, skip_forward=True)
         if all_envs:
