@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v13c。以前の版は g1-ladder, g1-ladder-v2〜v13b）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v14。以前の版は g1-ladder, g1-ladder-v2〜v13c）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -116,7 +116,10 @@ def get_cfgs():
         # 行動 1 あたりの目標角度の変化 [rad]（腕は大きく動かす必要があるので大きめ）
         "action_scale": {"hip": 0.25, "knee": 0.25, "ankle": 0.25, "waist": 0.25, "shoulder": 0.5, "elbow": 0.5,
                          "wrist": 0.25},
-        "clip_actions": 100.0,
+        # 行動の上限。v13c までは 100。方策は肩の行動を 24〜37 程度（目標角度が可動域を大きく超え、最大トルクを出し続ける使い方）
+        # にしていて、行動の急変の減点（action_rate）が減点の中で最大だった。10 でも肩の目標角度は ±5 rad で可動域の外なので
+        # 最大トルクは出せる。v14 で 10 に（腕を逆向きに大きく動かす動き＝手を次の段へ移す動きを減点で妨げないため）
+        "clip_actions": 10.0,
         # シミュレーション
         "dt": 0.02,
         "substeps": 4,
@@ -125,7 +128,7 @@ def get_cfgs():
         "episode_length_s": 15.0,
         # はしご：横棒の間隔 0.25 m（はしごに沿った距離）、一番下の段は根元から 0.25 m
         "ladder": {
-            "num_rungs": 8,  # 一番上ははしごに沿って 2.0 m。v11a・v12 は 12 本（3.0 m）、v13 で 8 本に戻した
+            "num_rungs": 12,  # 一番上ははしごに沿って 3.0 m。v11a・v12・v14 は 12 本、v10・v13〜v13c は 8 本（2.0 m）
             "rung_first": 0.25,
             "rung_spacing": 0.25,
             "rung_width": 0.6,  # 横棒の長さ [m]
@@ -164,7 +167,7 @@ def get_cfgs():
             # はしごにぶら下がった姿勢から始めるエピソード（v3。逆向きのカリキュラム）
             "hang": {
                 "prob": 0.3,  # エピソードのこの割合をぶら下がった姿勢から始める（段階の更新には使わない）
-                "rungs": (5, 7),  # 握る段（下から 6〜8 段目。足が床から浮く高さ。v11a・v12 は 6〜11 段目）
+                "rungs": (5, 10),  # 握る段（下から 6〜11 段目。足が床から浮く高さ。v10・v13〜v13c は 6〜8 段目）
                 "standoff": 0.05,  # 手のひらを横棒の中心線から、ロボットの側にこの距離 [m] 離して置く
                 # 腕を前に上げた姿勢（手のひらは腰から前に約 0.14 m、上に約 0.56 m）
                 "arm_pose": {
@@ -188,7 +191,8 @@ def get_cfgs():
         },
         # タスクの判定
         "task": {
-            "target_rung": 2,  # 両足でこの段（下から 3 段目、はしごに沿って 0.75 m）以上に立てたら成功（v11a・v12 は 6 段目・1.5 m）
+            "target_rung": 5,  # 両足でこの段（下から 6 段目、はしごに沿って 1.5 m）以上に立てたら成功（v10・v13〜v13c は 3 段目・0.75 m）。
+            # v14 は目標の段のカリキュラム（curriculum_cfg の target_init）を使うので、これは目標の上限
             # 到達度の内訳：横棒への手の近さ・握った手の高さ・重心の上がった割合・横棒に乗った足の高さ
             # v8 で「手で握っている間に足を持ち上げた高さ」（重み 0.15）を加え、重心の高さ 0.5 → 0.4、足の段 0.25 → 0.2 に
             "progress_weights": (0.05, 0.2, 0.4, 0.2, 0.15),
@@ -266,7 +270,9 @@ def get_cfgs():
         # 目標の段のカリキュラム（v12）：床からの開始の目標を下から 3 段目から始め、成功するたびに 1 段上げる（上限は task.target_rung）。
         # 最高到達度が target_down_progress 未満で終わったら 1 段下げる。ぶら下がり・床に立って握った姿勢からの開始は常に上限の段が目標
         # （v11a でいきなり 6 段目を目標にしたら、床からの開始は v10 の目標だった 3 段目で止まったまま抜け出せなかった）
-        # v13 では使わない（目標は 3 段目で固定）。使うときは "target_init": 2, "target_down_progress": 0.5 を加える
+        # v13〜v13c では使わなかった（目標は 3 段目で固定）。v14 で再び使う（v13c の上から握る手で、握り直しが出るかを確かめる）
+        "target_init": 2,
+        "target_down_progress": 0.5,
         # 補助の力：はしごに手か足が掛かっている間、体重 × assist_init の上向きの力を腰にかける
         "assist_init": 0.4,
         "assist_anneal_steps": 1500 * 24,  # 1500 イテレーションかけて 0 まで下げる
@@ -276,7 +282,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v13c", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v14", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
