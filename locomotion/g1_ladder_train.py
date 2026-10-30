@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v13。以前の版は g1-ladder, g1-ladder-v2〜v12）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v13b。以前の版は g1-ladder, g1-ladder-v2〜v13）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -140,8 +140,16 @@ def get_cfgs():
             # 横棒が手のひら側にあるときだけ握れる（v13）：手のひらの中心点から横棒の中心線への向きと、手のひらの向き（手の部品の
             # 座標の -z、指が曲がる側）がなす角の cos がこれより大きいとき（0.5 = 60° 以内）。v12 までは手の甲や側面でも握れた
             "palm_facing_cos": 0.5,
-            "stiffness": 3000.0,  # [N/m]
-            "damping": 60.0,  # [N·s/m]
+            # 横棒を上から握るときだけ握れる（v13b）：手のひらの向きと真下のなす角の cos がこれより大きいとき（0.5 = 60° 以内）。
+            # v13 では握る瞬間の約半分が、手のひらを上に向けて横棒を下からつかんでいた
+            "palm_down_cos": 0.5,
+            # 握っている間、手のひらの向きと握った横棒への向きのなす角の cos がこれ未満になったら外れる（v13b。0.0 = 90°）。
+            # v13 では握った後に手首を回し、握っている時間の 9 割近くで手の甲や側面を横棒に当てていた
+            "palm_release_cos": 0.0,
+            # v13b で 3000 → 10000 N/m に（3000 では片手で 150 N を支えると手のひらが約 5 cm 沈み、横棒との隙間に見えた。
+            # 10000 で約 1.7 cm。15000 まで試して計算が不安定にならないことを確認）。減衰は硬さの平方根に比例させた
+            "stiffness": 10000.0,  # [N/m]
+            "damping": 110.0,  # [N·s/m]
             "max_force": 250.0,  # 握力の上限 [N]（片手。体重 32 kg の約 8 割）
             "slip_distance": 0.12,  # 手のひらが握った位置からこれ以上ずれたら、滑って外れたとみなす [m]
         },
@@ -266,7 +274,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v13", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v13b", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

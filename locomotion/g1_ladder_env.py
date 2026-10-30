@@ -466,6 +466,13 @@ class G1LadderEnv:
             to_rung = transform_by_quat(rung_pt - self.palms_pos, inv_quat(hand_quat))
             facing = -to_rung[..., 2] / torch.norm(to_rung, dim=-1).clamp(min=1e-6)
             within &= facing > palm_cos
+        # v13b：横棒を上から握るときだけ握れる（手のひらが下向き寄り：手のひらの向きと真下のなす角の cos が palm_down_cos より大きい）
+        #   手のひら側の条件と合わせると、横棒が手のひらの下にある＝上から握っていることになる
+        palm_down = gc.get("palm_down_cos")
+        if palm_down is not None:
+            hand_quat = self.robot.get_links_quat(self.hands_links_idx)
+            palm_normal = transform_by_quat(torch.tensor([0.0, 0.0, -1.0], device=gs.device).expand(hand_quat.shape[:-1] + (3,)), hand_quat)
+            within &= -palm_normal[..., 2] > palm_down
         new_grip = command & within & ~self.grip
         # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
         self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
@@ -474,6 +481,16 @@ class G1LadderEnv:
         # 離す：指令をやめた、または握力の限界を超えて手が大きくずれた（滑って外れた）
         stretch = torch.norm(self.grip_anchor - self.palms_pos, dim=-1)
         self.grip = self.grip & command & (stretch < gc["slip_distance"])
+        # v13b：握っている間に手のひらが握った横棒から大きくそれたら外れる（手のひらの向きと横棒への向きのなす角の cos が
+        #   palm_release_cos 未満。握った後に手首を回して、手の甲や側面を横棒に当てる握り方を防ぐ）
+        release_cos = gc.get("palm_release_cos")
+        if release_cos is not None:
+            held_pt = self.rung_s[self.grip_rung][..., None] * self.ladder_u[:, None, :]
+            held_pt[..., 1] = self.palms_pos[..., 1]
+            hand_quat = self.robot.get_links_quat(self.hands_links_idx)
+            to_held = transform_by_quat(held_pt - self.palms_pos, inv_quat(hand_quat))
+            held_facing = -to_held[..., 2] / torch.norm(to_held, dim=-1).clamp(min=1e-6)
+            self.grip = self.grip & (held_facing > release_cos)
         # 高い段を初めて握ったか（腕を使うことを促す一度きりの報酬に使う）
         high = self.grip_anchor[:, :, 2] > self.env_cfg["task"]["first_grip_min_height"]
         grip_high = self.grip & high
