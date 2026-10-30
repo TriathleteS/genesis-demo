@@ -455,6 +455,17 @@ class G1LadderEnv:
         if min_contact is not None:
             hand_force = torch.norm(self.contact_forces[:, self.hands_links_idx], dim=-1)
             within &= hand_force > min_contact
+        # v13：横棒が手のひら側にあるときだけ握れる（手の甲や側面で触れていても握れない）
+        #   手のひらの向きは、手の部品の座標の -z 方向（指が曲がる側）。手のひらの中心点から一番近い横棒の中心線への向きが、
+        #   手のひらの向きとなす角の cos が palm_facing_cos より大きければ「手のひら側」
+        palm_cos = gc.get("palm_facing_cos")
+        if palm_cos is not None:
+            rung_pt = self.rung_s[kmin][..., None] * self.ladder_u[:, None, :]
+            rung_pt[..., 1] = self.palms_pos[..., 1]
+            hand_quat = self.robot.get_links_quat(self.hands_links_idx)
+            to_rung = transform_by_quat(rung_pt - self.palms_pos, inv_quat(hand_quat))
+            facing = -to_rung[..., 2] / torch.norm(to_rung, dim=-1).clamp(min=1e-6)
+            within &= facing > palm_cos
         new_grip = command & within & ~self.grip
         # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
         self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
