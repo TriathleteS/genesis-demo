@@ -329,6 +329,10 @@ uv run python locomotion/g1_ladder_eval.py                         # 最新の�
 uv run python locomotion/g1_ladder_eval.py --angle 90              # 傾きを変える（学習は 70〜90°）
 uv run python locomotion/g1_ladder_eval.py --no-viewer --trials 20 --angle 75   # 画面なしで 20 回挑戦し、成功率を表示
 uv run python locomotion/g1_ladder_eval.py --record --angle 75     # 録画する
+uv run python locomotion/g1_ladder_eval.py --start hang --angle 90 # ぶら下がった姿勢から始める（v3 以降のモデル）
+uv run python locomotion/g1_ladder_eval.py --start hang --hang-rung 7 --angle 90 --record
+                                                                   # 握る段を指定する（0 が一番下。学習では 5〜7）
+uv run python locomotion/g1_ladder_eval.py --start stand --angle 90  # 床に立って握った姿勢から始める（v4 以降のモデル）
 ```
 
 1 回の挑戦は最大 15 秒です。転倒したとき、4 秒間進まなかったとき（停滞、v5）も次の挑戦に移ります。キー操作はよじ登りと同じです（Enter：開始・一時停止、Backspace：はしごの手前に戻す）。
@@ -674,6 +678,7 @@ uv run python locomotion/g1_eval.py --record --no-viewer --duration 20   # 画�
 - v5 の学習済みモデル（model_5699）から学習を続ける。
 - 足が横棒に乗っている判定を厳しくし、段ごとの報酬は「同じ段に 0.2 秒以上乗り続けてから」「1 回に 1 段まで」数える（上記）。到達度の「横棒に乗った足の高さ」も、この判定を使う。
 - 確認：v5 のモデルを v6 の判定で動かすと、床からの開始の蹴り上げは数えられなくなり、ぶら下がり開始の成功はそのまま数えられた。
+- 補足（v5 のモデル、ぶら下がる段ごとに 16 体 × 10 秒）：成功はすべて、一番上の 7 段目（下から 8 段目）にぶら下がった回だった（80°：5 回の打ち切り・転倒に対し成功 21 回、90°：成功 23 回）。この場合、足はもともと目標の 3 段目のすぐ近くにあり、足を 3 段目に乗せるだけで成功になる。5・6 段目にぶら下がった回は、80°・90° とも成功 0 で、ほとんど転倒した。つまり v5 は「ぶら下がったまま、近くの段に足を乗せて体を支える」ことはできるが、手を握り直しながら何段も登る動きはまだできていない。
 
 ### 次に試すとよいこと（候補）
 
