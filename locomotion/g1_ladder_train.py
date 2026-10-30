@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v5。以前の版は g1-ladder, g1-ladder-v2〜v4）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v6。以前の版は g1-ladder, g1-ladder-v2〜v5）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -177,8 +177,11 @@ def get_cfgs():
             "stand_com_height": 0.68,  # 立っているときの全身の重心の高さ [m]
             "support_min_steps": 5,  # 握るか足を横棒に乗せて 0.1 秒たってから重心の高さを数える
             "max_rise_speed": 0.8,  # 胴体の上下の速さがこれ [m/s] 未満のときだけ重心の高さを数える
-            "foot_off_floor_height": 0.08,  # 足のリンクがこれより高ければ床から離れている [m]
-            "foot_rung_distance": 0.12,  # 足のリンクが横棒の中心線からこの距離 [m] 以内なら横棒に乗っている
+            # 足が横棒に乗っているとみなす範囲（v6）：足のリンクの原点（足首、足の裏から約 3.5 cm 上）と横棒の中心の差 [m]
+            #   高さ：横棒の上面（中心 + 2 cm）に足の裏が乗っていれば約 +5.5 cm
+            #   前後：足首が横棒の真上から、足の裏の長さの分だけ手前まで（つま先側を横棒に掛けている）
+            "foot_on_rung": {"dz_min": 0.03, "dz_max": 0.10, "dx_min": -0.16, "dx_max": 0.06},
+            "foot_hold_time_s": 0.2,  # 段ごとの報酬は、足が同じ段にこの時間 [s] 以上乗り続けてから数える（v6）
             "min_base_height": 0.4,  # 腰がこれより低くなったら転倒 [m]
             "max_roll": 1.0,
             "max_pitch_forward": 1.0,
@@ -243,7 +246,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v5", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v6", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
