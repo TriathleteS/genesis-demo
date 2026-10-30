@@ -225,6 +225,8 @@ class G1LadderEnv:
         self.num_levels = int(round((cc["angle_max"] - cc["angle_min"]) / cc["angle_step"])) + 1
         self.levels = torch.randint(0, cc["init_max_level"] + 1, (n,), device=gs.device)
         self.fixed_angle = None  # 評価時に傾きを固定する [deg]
+        self.eval_start = None  # 評価時の開始の仕方（None/"ground"：床から、"hang"：ぶら下がり、"stand"：床に立って握る）
+        self.eval_hang_rung = None  # 評価時に "hang" で握る段（None ならランダム）
         self.angle_override = torch.full((n,), float("nan"), **f)
         self.is_review = torch.zeros((n,), **b)
         self.is_hang = torch.zeros((n,), **b)  # はしごにぶら下がった姿勢から始めたエピソードか（v3）
@@ -302,6 +304,15 @@ class G1LadderEnv:
         self.target_height = self.rung_s[k_target] * s
         for k, rung in enumerate(self.rungs):
             rung.set_pos(self.rung_s[k] * self.ladder_u)
+
+    def set_eval_start(self, start, hang_rung=None):
+        """評価用：開始の仕方を固定する（"ground"・"hang"・"stand"）。"""
+        if start == "hang" and not self.hang_cfg:
+            raise ValueError("この実験の設定には、ぶら下がった姿勢からの開始（reset.hang）がありません（v3 以降の版で使えます）。")
+        if start == "stand" and not self.stand_cfg:
+            raise ValueError("この実験の設定には、床に立って握った姿勢からの開始（reset.stand_grip）がありません（v4 以降の版で使えます）。")
+        self.eval_start = start
+        self.eval_hang_rung = hang_rung
 
     def set_ladder_angle(self, angle_deg):
         """評価用：はしごの傾きを固定する [deg]。"""
@@ -631,10 +642,18 @@ class G1LadderEnv:
         # 一部の環境は、はしごの高い段を両手で握ってぶら下がった姿勢から始める（v3。逆向きのカリキュラム）
         #   体をはしごと平行に傾け、手のひらが横棒の少し手前に来るように腰の位置を決める。始めた時点で両手は握っている
         hang = torch.zeros_like(mask)
-        if self.hang_cfg and self.fixed_angle is None:
+        # 学習中はランダムに混ぜる。評価中は set_eval_start で指定したときだけ使う
+        use_hang = bool(self.hang_cfg) and (self.fixed_angle is None or self.eval_start == "hang")
+        use_stand = bool(self.stand_cfg) and (self.fixed_angle is None or self.eval_start == "stand")
+        if use_hang:
             hc = self.hang_cfg
-            hang = mask & ~review & (torch.rand((self.num_envs,), device=gs.device) < hc["prob"])
+            if self.eval_start == "hang":
+                hang = mask.clone()
+            else:
+                hang = mask & ~review & (torch.rand((self.num_envs,), device=gs.device) < hc["prob"])
             m = torch.randint(hc["rungs"][0], hc["rungs"][1] + 1, (self.num_envs,), device=gs.device)
+            if self.eval_hang_rung is not None:
+                m = torch.full_like(m, int(self.eval_hang_rung))
             lean = math.pi / 2 - self.ladder_angle  # はしごと平行になるよう前に傾ける角度
             hang_quat = torch.stack(
                 (torch.cos(lean / 2), torch.zeros_like(lean), torch.sin(lean / 2), torch.zeros_like(lean)), dim=1
@@ -652,7 +671,7 @@ class G1LadderEnv:
         #   体はまっすぐ立てたまま、手のひらが横棒の少し手前に来る位置に立たせる。足がはしごの下に入ってしまう
         #   緩やかなはしごや、腰が高く浮きすぎる場合は、ふつうの姿勢から始める
         stand = torch.zeros_like(mask)
-        if self.stand_cfg and self.fixed_angle is None:
+        if use_stand:
             sc = self.stand_cfg
             sin_t, cos_t = torch.sin(self.ladder_angle), torch.cos(self.ladder_angle)
             off = self.stand_palm_offset.mean(dim=0)
@@ -665,7 +684,10 @@ class G1LadderEnv:
             stand_pelvis[:, 2] = stand_pelvis[:, 2].clamp(min=sc["height"])  # 脚が床にめり込まないように
             foot_n = -sin_t * stand_pelvis[:, 0] + cos_t * 0.05
             valid = (foot_n > -0.03) & (stand_pelvis[:, 2] < sc["height"] + 0.15)
-            stand = mask & ~review & ~hang & valid & (torch.rand((self.num_envs,), device=gs.device) < sc["prob"])
+            if self.eval_start == "stand":
+                stand = mask & valid
+            else:
+                stand = mask & ~review & ~hang & valid & (torch.rand((self.num_envs,), device=gs.device) < sc["prob"])
             stand_qpos = torch.cat(
                 (stand_pelvis, torch.tensor([1.0, 0.0, 0.0, 0.0], device=gs.device).expand(self.num_envs, -1),
                  self.stand_dof_pos_all.expand(self.num_envs, -1)),
@@ -705,12 +727,12 @@ class G1LadderEnv:
         for buf in (self.grip, self.first_grip, self.gripped_once, self.feet_on_rung):
             buf.masked_fill_(m1, False)
         self.grip_force.masked_fill_(mask[:, None, None], 0.0)
-        if self.hang_cfg and self.fixed_angle is None:
+        if use_hang:
             self.grip |= hang[:, None]
             self.gripped_once |= hang[:, None]  # 最初から握っている分には、初めて握った報酬を出さない
             self.grip_anchor = torch.where(hang[:, None, None], hang_anchor, self.grip_anchor)
             self.grip_rung = torch.where(hang[:, None], m[:, None].expand(-1, 2), self.grip_rung)
-        if self.stand_cfg and self.fixed_angle is None:
+        if use_stand:
             self.grip |= stand_grip
             self.gripped_once |= stand[:, None]
             self.grip_anchor = torch.where(stand_grip[..., None], stand_anchor, self.grip_anchor)

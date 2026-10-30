@@ -7,13 +7,19 @@
     uv run python locomotion/g1_ladder_eval.py --no-viewer --trials 20 --angle 75
                                                                    # 画面なしで 20 回挑戦し、成功率を表示する
     uv run python locomotion/g1_ladder_eval.py --record            # videos/ に録画する
+    uv run python locomotion/g1_ladder_eval.py --start hang --angle 90
+                                                                   # はしごの高い段を両手で握ってぶら下がった姿勢から始める
+    uv run python locomotion/g1_ladder_eval.py --start hang --hang-rung 6
+                                                                   # ぶら下がるときに握る段を指定する（0 が一番下。学習では 5〜7）
+    uv run python locomotion/g1_ladder_eval.py --start stand --angle 90
+                                                                   # 床に立ったまま、肩より少し上の段を両手で握った姿勢から始める
 
 1 回の挑戦は最大 15 秒。転倒するか、15 秒たつか、4 秒間進まなかった（停滞）と、自動ではしごの手前に戻って次の挑戦を始める。
 成功：両足が下から 3 段目以上の横棒に乗り、少なくとも片手で横棒を握っている。
 
 ビューアー上のキー操作:
     Enter     : 開始・一時停止（ビューアーは止まった状態で開くので、録画の準備ができたら押す）
-    Backspace : はしごの手前に戻して一時停止する（撮り直し用）
+    Backspace : 最初の姿勢に戻して一時停止する（撮り直し用）
     R         : ビューアーの画面をそのまま録画する（Genesis の標準機能）
 """
 
@@ -45,6 +51,11 @@ def main():
     parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v6", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--angle", type=float, default=75.0, help="はしごの傾き（床からの角度）[deg]")
+    parser.add_argument(
+        "--start", choices=["ground", "hang", "stand"], default="ground",
+        help="開始の仕方（ground：床から、hang：ぶら下がった姿勢から、stand：床に立って握った姿勢から）",
+    )
+    parser.add_argument("--hang-rung", type=int, default=None, help="--start hang で握る段（0 が一番下。省略時は 5〜7 からランダム）")
     parser.add_argument("--no-wait", action="store_true", help="Enter を待たずにすぐ始める")
     parser.add_argument("--no-viewer", action="store_true", help="ビューアーなしで --trials 回挑戦し、成功率を表示する")
     parser.add_argument("--trials", type=int, default=10, help="--no-viewer のときの挑戦回数")
@@ -76,8 +87,10 @@ def main():
         camera_res=tuple(int(v) for v in args.record_res.lower().split("x")) if args.record is not None else None,
         rail_angle_deg=args.angle,
     )
+    env.set_eval_start(args.start, args.hang_rung)
     env.set_ladder_angle(args.angle)
-    print(f"はしごの傾き: {args.angle:.1f}°")
+    start_name = {"ground": "床から", "hang": "ぶら下がった姿勢から", "stand": "床に立って握った姿勢から"}[args.start]
+    print(f"はしごの傾き: {args.angle:.1f}°、開始: {start_name}")
 
     if args.ckpt is None:
         ckpts = [int(m.group(1)) for p in glob.glob(os.path.join(log_dir, "model_*.pt"))
@@ -106,7 +119,7 @@ def main():
             Keybind("climb_start_pause", Key.ENTER, KeyAction.PRESS, callback=toggle_run),
             Keybind("climb_reset", Key.BACKSPACE, KeyAction.PRESS, callback=request_reset),
         )
-        print("Enter: 開始・一時停止, Backspace: はしごの手前に戻す")
+        print("Enter: 開始・一時停止, Backspace: 最初の姿勢に戻す")
 
     # 録画（動いている間だけ録画する）
     record_path = None
@@ -159,7 +172,7 @@ def main():
                     trial.update(step=0, climb_time=None)
                     state.update(reset=False, running=False)
                     env.scene.viewer.update(force=True)
-                    print("はしごの手前に戻しました。Enter で始まります。")
+                    print("最初の姿勢に戻しました。Enter で始まります。")
                 update_recording()
                 if not state["running"]:
                     env.scene.viewer.sleep(1 / 30)
