@@ -185,6 +185,8 @@ class G1LadderEnv:
         self.feet_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各足が乗った最高の段
         self.feet_hold_steps = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 各足が同じ段に乗り続けているステップ数（v6）
         self.feet_prev_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)
+        self.hands_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各手が握った最高の段（v7）
+        self.new_hand_rungs = torch.zeros((n,), **f)  # 今のステップで、手が初めて握った（1 つ上の）段の数（v7）
         self.new_rungs = torch.zeros((n,), **f)  # 今のステップで、足が初めて乗った段の数（v5）
         self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
 
@@ -506,13 +508,27 @@ class G1LadderEnv:
         same = (self.feet_rung_idx == self.feet_prev_rung) & (self.feet_rung_idx >= 0)
         self.feet_hold_steps = torch.where(same, self.feet_hold_steps + 1, torch.zeros_like(self.feet_hold_steps))
         self.feet_prev_rung = self.feet_rung_idx.clone()
-        held_rung = torch.where(
-            self.feet_hold_steps * self.dt >= tc.get("foot_hold_time_s", 0.0), self.feet_rung_idx,
-            torch.full_like(self.feet_rung_idx, -1),
-        )
+        held = self.feet_hold_steps * self.dt >= tc.get("foot_hold_time_s", 0.0)
+        # v7：腰より foot_below_base 以上低い段だけ数える（手と同じ高さの段に足を蹴り上げて掛ける動きを数えない）
+        below = tc.get("foot_below_base")
+        if below is not None:
+            rung_z = self.rung_s[self.feet_rung_idx.clamp(min=0)] * torch.sin(self.ladder_angle)[:, None]
+            held &= rung_z < self.base_pos[:, 2:3] - below
+        held_rung = torch.where(held, self.feet_rung_idx, torch.full_like(self.feet_rung_idx, -1))
         higher = (held_rung > self.feet_best_rung).to(gs.tc_float)
         self.new_rungs = higher.sum(dim=1)
         self.feet_best_rung = torch.maximum(self.feet_best_rung, held_rung)
+
+        # 手の段ごとの報酬（v7）：片手がこのエピソードで初めて 1 つ上の段を握ったとき。もう一方の手が握っているか、
+        # 両足が段に乗っているときだけ数える（体を支えたまま、手を離して上の段を握り直す動きを促す）
+        hand_rung = torch.where(self.grip, self.grip_rung, torch.full_like(self.grip_rung, -1))
+        # 途中の姿勢から始めた直後は、最初に握らせた段を基準にする（握る指令を一瞬やめて握り直しても数えない）
+        self.hands_best_rung = torch.where(fresh_hang[:, None], self.grip_rung, self.hands_best_rung)
+        other_grip = self.grip.flip(dims=[1])
+        supported_hand = other_grip | self.feet_on_rung.all(dim=1, keepdim=True)
+        hand_higher = (hand_rung > self.hands_best_rung) & supported_hand
+        self.new_hand_rungs = hand_higher.to(gs.tc_float).sum(dim=1)
+        self.hands_best_rung = torch.where(hand_higher, hand_rung, self.hands_best_rung)
 
         # じっとしたら打ち切り（v5）：到達度の最高記録も足の段も stall_time_s 秒更新されず、目標の段にもいない
         improved = (self.progress_gain > 1e-4) | (self.new_rungs > 0)
@@ -742,7 +758,7 @@ class G1LadderEnv:
             self.grip |= stand_grip
             self.gripped_once |= stand[:, None]
             self.grip_anchor = torch.where(stand_grip[..., None], stand_anchor, self.grip_anchor)
-            self.grip_rung = torch.where(stand_grip, m_s[:, None].expand(-1, 2), self.grip_rung)
+            self.grip_rung = torch.where(stand[:, None], m_s[:, None].expand(-1, 2), self.grip_rung)
         self.feet_rung_idx.masked_fill_(m1, -1)
         self.in_contact.masked_fill_(mask, True)
         self.support_steps.masked_fill_(mask, 0)
@@ -752,6 +768,8 @@ class G1LadderEnv:
         self.feet_best_rung.masked_fill_(m1, -1)
         self.feet_hold_steps.masked_fill_(m1, 0)
         self.feet_prev_rung.masked_fill_(m1, -1)
+        self.hands_best_rung.masked_fill_(m1, -1)
+        self.new_hand_rungs.masked_fill_(mask, 0.0)
         self.flight_steps.masked_fill_(mask, 0)
         self.reset_buf.masked_fill_(mask, True)
 
@@ -772,6 +790,10 @@ class G1LadderEnv:
 
     def _reward_success(self):
         return self.just_succeeded.to(gs.tc_float)
+
+    def _reward_new_hand_rung(self):
+        # 片手がこのエピソードで初めて 1 つ上の段を握ったとき（v7）
+        return self.new_hand_rungs
 
     def _reward_new_rung(self):
         # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
