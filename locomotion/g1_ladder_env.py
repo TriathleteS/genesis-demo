@@ -461,12 +461,18 @@ class G1LadderEnv:
         rung_pos = self.rung_s[None, :, None] * self.ladder_u[:, None, :]  # [n, 段, 3]
         dz = self.feet_pos[:, :, None, 2] - rung_pos[:, None, :, 2]  # [n, 足, 段]：足のリンクの原点と横棒の中心の高さの差
         dx = self.feet_pos[:, :, None, 0] - rung_pos[:, None, :, 0]  # 足のリンクの原点（足首）と横棒の前後の差
-        fw = tc["foot_on_rung"]
-        on = (
-            (dz > fw["dz_min"]) & (dz < fw["dz_max"]) & (dx > fw["dx_min"]) & (dx < fw["dx_max"])
-            & (torch.abs(self.feet_pos[:, :, None, 1]) < self.env_cfg["ladder"]["rung_width"] / 2)
-            & (feet_force[:, :, None] > 5.0)
-        )
+        fw = tc.get("foot_on_rung")
+        if fw is not None:
+            on = (
+                (dz > fw["dz_min"]) & (dz < fw["dz_max"]) & (dx > fw["dx_min"]) & (dx < fw["dx_max"])
+                & (torch.abs(self.feet_pos[:, :, None, 1]) < self.env_cfg["ladder"]["rung_width"] / 2)
+                & (feet_force[:, :, None] > 5.0)
+            )
+        else:
+            # v5 までの設定で再生するとき：その版の（緩い）判定を使う
+            _, _, fk_old, fd_old, _ = self._ladder_coords(self.feet_pos)
+            on_old = (self.feet_pos[:, :, 2] > tc["foot_off_floor_height"]) & (fd_old < tc["foot_rung_distance"]) & (feet_force > 5.0)
+            on = on_old[:, :, None] & (torch.arange(self.num_rungs, device=gs.device) == fk_old[:, :, None])
         self.feet_on_rung = on.any(dim=-1)
         fk = on.to(torch.int64).argmax(dim=-1)
         self.feet_rung_idx = torch.where(self.feet_on_rung, fk, torch.full_like(fk, -1))

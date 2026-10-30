@@ -69,6 +69,12 @@ def main():
     gs.init(backend=gs.cpu, logging_level="warning")
 
     log_dir = f"logs/{args.exp_name}"
+    if not os.path.exists(f"{log_dir}/cfgs.pkl"):
+        found = sorted(d for d in os.listdir("logs") if d.startswith("g1-ladder")) if os.path.isdir("logs") else []
+        raise SystemExit(
+            f"{log_dir} に学習結果がありません。-e で実験名を指定してください"
+            f"（logs にあるはしごの実験：{', '.join(found) or 'なし'}）。"
+        )
     with open(f"{log_dir}/cfgs.pkl", "rb") as f:
         env_cfg, obs_cfg, reward_cfg, curriculum_cfg, train_cfg = pickle.load(f)
     # 再生時は観測ノイズと補助の力を止め、ロボットの置き方のばらつきも小さくする
