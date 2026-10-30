@@ -99,9 +99,11 @@ class G1LadderEnv:
                     ),
                     surface=gs.surfaces.Default(color=(0.6, 0.45, 0.25)),
                 )
-        self.robot = self.scene.add_entity(
-            gs.morphs.URDF(file=env_cfg.get("urdf_path") or DEFAULT_URDF, pos=(-0.5, 0.0, 0.8)),
-        )
+        # ロボットのモデル（urdf_path がファイル名だけなら assets/unitree_g1 の中を探す）
+        urdf = env_cfg.get("urdf_path") or DEFAULT_URDF
+        if not os.path.isabs(urdf):
+            urdf = os.path.join(os.path.dirname(DEFAULT_URDF), urdf)
+        self.robot = self.scene.add_entity(gs.morphs.URDF(file=urdf, pos=(-0.5, 0.0, 0.8)))
 
         self.camera = None
         if camera_res is not None:

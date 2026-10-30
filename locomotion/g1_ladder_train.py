@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v8。以前の版は g1-ladder, g1-ladder-v2〜v7）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v9。以前の版は g1-ladder, g1-ladder-v2〜v8）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -90,6 +90,9 @@ def get_cfgs():
     ]  # fmt: skip
     env_cfg = {
         "joint_names": joint_names,
+        # ロボットのモデル（v9）：足の裏に板状の当たり判定を加えたもの。元のモデルは足の裏の当たり判定が、かかととつま先の
+        # 小さな球 4 個だけで、はしごの細い横棒が土踏まずの下に来るとすり抜ける（g1_ladder_pose_check.py で確認）
+        "urdf_path": "g1_23dof_rev_1_0_sole.urdf",
         # 行動が 0 のときの目標姿勢 [rad]：膝を軽く曲げて立ち、腕は肘を曲げて体の前に構える
         "default_joint_angles": {
             "left_hip_pitch_joint": -0.1, "left_hip_roll_joint": 0.0, "left_hip_yaw_joint": 0.0,
@@ -251,7 +254,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v8", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v9", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
