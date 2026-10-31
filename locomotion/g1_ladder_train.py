@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15h。以前の版は g1-ladder, g1-ladder-v2〜v15g）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15i。以前の版は g1-ladder, g1-ladder-v2〜v15h）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -249,7 +249,10 @@ def get_cfgs():
             # 近づき、横棒の下面に当たって止まっていた。v15〜v15f は横棒の中心線までの距離で測っていた）
             # v15h：ロボット側へ 3 cm → 10 cm（横棒の手前へよけてから上へ出る道筋で、ずっと距離が縮むように。v15g では、
             #   真下にある手を手前へよけると目標までの距離がかえって増えたので、離した手は横棒の真下で止まっていた）
-            "hand_reach_target": {"up": 0.06, "toward_robot": 0.10, "max_palm_up_cos": 0.5},
+            # v15i：2 段階目（stage2）。手のひらの中心が横棒の上面より上に出たら、握れる位置（横棒の中心から上へ 4 cm・手前へ
+            #   2 cm）に近づいた分も数える（distance [m] 以内で増え始める）。度合いは 1 段階目と 2 段階目の半分ずつ
+            "hand_reach_target": {"up": 0.06, "toward_robot": 0.10, "max_palm_up_cos": 0.5,
+                                  "stage2": {"up": 0.04, "toward_robot": 0.02, "distance": 0.15}},
             "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True,
                             "terminate_on_violation": True, "success_requires_order": True},
         },
@@ -322,7 +325,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15h", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15i", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")

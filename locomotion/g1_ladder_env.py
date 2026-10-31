@@ -711,7 +711,21 @@ class G1LadderEnv:
                 d_hand = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2)  # [n, 2]
                 hq = self.robot.get_links_quat(self.hands_links_idx)
                 nz = transform_by_quat(torch.tensor([0.0, 0.0, -1.0], device=gs.device).expand(hq.shape[:-1] + (3,)), hq)[..., 2]
-                p_hand = (1.0 - d_hand / tc["reach_distance"]).clamp(0.0, 1.0) * (nz <= rt["max_palm_up_cos"]).to(gs.tc_float)
+                ok_dir = (nz <= rt["max_palm_up_cos"]).to(gs.tc_float)
+                p_hand = (1.0 - d_hand / tc["reach_distance"]).clamp(0.0, 1.0) * ok_dir
+                s2 = rt.get("stage2")
+                if s2 is not None:
+                    # v15i：2 段階の目標。1 段階目は上の点（横棒の手前の上）、手のひらの中心が横棒の上面より上に出たら、
+                    #   2 段階目の目標（握れる位置：横棒の中心から上へ s2.up・手前へ s2.toward_robot）にも近づいた分を数える。
+                    #   度合いは 1 段階目と 2 段階目の半分ずつ。v15h では、離した手を 1 段階目の点の近くまで運べても、
+                    #   そこから横棒へ下ろす約 5 cm の動きに報酬がなく、握る動きが出なかった
+                    aim2 = rung_pt + s2["up"] * up + s2["toward_robot"] * self.ladder_nrm[:, None, :]
+                    dv2 = self.palms_pos - aim2
+                    d2 = torch.sqrt(dv2[..., 0] ** 2 + dv2[..., 2] ** 2)
+                    rung_top = rung_pt[..., 2] + self.env_cfg["ladder"]["rung_thickness"] / 2
+                    above = (self.palms_pos[..., 2] > rung_top).to(gs.tc_float)
+                    p2 = (1.0 - d2 / s2["distance"]).clamp(0.0, 1.0) * ok_dir * above
+                    p_hand = 0.5 * p_hand + 0.5 * p2
                 p_next = p_hand.max(dim=1).values
             else:
                 dv = self.palms_pos - rung_pt
