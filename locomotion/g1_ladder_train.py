@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15k。以前の版は g1-ladder, g1-ladder-v2〜v15j）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15l。以前の版は g1-ladder, g1-ladder-v2〜v15k）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -198,6 +198,8 @@ def get_cfgs():
                 "hand_rung": 3,  # 握る段（0 が一番下。下から 4 段目）
                 "foot_rung": 1,  # 足を乗せる段（下から 2 段目）
                 "target": 2,  # 目標の段（下から 3 段目）
+                "hand_up": 0.06,  # 手のひらの中心を、横棒の中心から上へこの距離 [m] に置く（上から握る）
+                "hand_toward": 0.0,  # 手のひらの中心を、横棒の中心からロボット側へこの距離 [m] に置く
                 "poses": MID_POSES_FEET2_HANDS4,  # 傾きごとの姿勢（g1_ladder_mid_poses.py）
             },
             # 床に立ったまま、肩より少し上の段を両手で握った姿勢から始めるエピソード（v4。床からはしごへ移る練習）
@@ -341,7 +343,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15k", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15l", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
