@@ -721,6 +721,11 @@ class G1LadderEnv:
         self.on_target = (
             self.feet_on_rung.all(dim=1) & (self.feet_rung_idx >= self.episode_target[:, None]).all(dim=1) & self.grip.any(dim=1)
         )
+        if turn_cfg is not None and turn_cfg.get("success_requires_order", False):
+            # v15f：両足が「足の番に正しく上げた段」以下にあるときだけ、目標の段に立ったとみなす。成功の判定は足が触れた瞬間に
+            #   成り立つが、順番違反は同じ段に 0.2 秒乗ってから数えるので、v15e では順番を守らずに両足を目標の段に乗せて
+            #   成功の報酬を受け取り、その 0.2 秒後に順番違反で打ち切られていた
+            self.on_target &= (self.feet_rung_idx <= self.feet_turn_best[:, None]).all(dim=1)
         self.just_succeeded = self.on_target & ~self.succeeded
         self.succeeded |= self.on_target
 
