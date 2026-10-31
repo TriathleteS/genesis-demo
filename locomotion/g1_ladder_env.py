@@ -248,6 +248,7 @@ class G1LadderEnv:
         self.angle_override = torch.full((n,), float("nan"), **f)
         self.is_review = torch.zeros((n,), **b)
         self.is_hang = torch.zeros((n,), **b)  # はしごにぶら下がった姿勢から始めたエピソードか（v3）
+        self.is_hang_only = torch.zeros((n,), **b)  # そのうち、床に立って握った姿勢ではなく、ぶら下がった姿勢から始めたか（v15c）
         self.common_step_counter = 0
         self.assist_scale = cc["assist_init"]
         self.success_rate_ema = 0.0
@@ -620,6 +621,12 @@ class G1LadderEnv:
             self.feet_turn_best = torch.where(fresh_hang, self.feet_best_rung.max(dim=1).values, self.feet_turn_best)
             beyond = held_rung > self.feet_turn_best[:, None]
             foot_turn = ~self.hand_turn[:, None]
+            # v15c：足の番に上げてよいのは 1 段だけ（それまでの最高の段の 1 つ上。床からなら 1 段目）。それより上は順番違反。
+            #   v15b では、足の番のうちに床から 1・2 段目を飛ばして一気に 3 段目に乗り、手を握り直さずに 3 段目まで登っていた。
+            #   ぶら下がった姿勢から始めて、足がまだどの段にも乗っていないときは例外（足を下の段へ下ろすだけなので、どの段でもよい）
+            if turn_cfg.get("one_rung_per_turn", False):
+                first_from_hang = (self.is_hang_only & (self.feet_turn_best < 0))[:, None]
+                foot_turn = foot_turn & ((held_rung <= self.feet_turn_best[:, None] + 1) | first_from_hang)
             self.out_of_turn = (higher & beyond & ~foot_turn).to(gs.tc_float).sum(dim=1)
             higher = higher & (~beyond | foot_turn)
             self.feet_turn_best = torch.maximum(
@@ -853,6 +860,7 @@ class G1LadderEnv:
             _, _, _, d_anchor, _ = self._ladder_coords(stand_anchor)
             stand_grip = stand[:, None] & (d_anchor < self.env_cfg["grip"]["grab_distance"])
         self.is_hang = torch.where(mask, hang | stand, self.is_hang)
+        self.is_hang_only = torch.where(mask, hang, self.is_hang_only)
         # 今のエピソードの目標の段：床からの開始は環境ごとの目標の段、ぶら下がり・床に立って握った姿勢からの開始と
         # 評価のときは一番上の目標（task.target_rung）
         k_max = self.env_cfg["task"]["target_rung"]
