@@ -299,6 +299,20 @@ class G1LadderEnv:
         self.stand_cfg = env_cfg["reset"].get("stand_grip")
         if self.stand_cfg:
             self.stand_dof_pos_all, self.stand_palm_offset = arm_pose_info(self.stand_cfg["arm_pose"])
+        # はしごの途中の姿勢（両足 foot_rung・両手 hand_rung）から始めるための準備（v15k）。姿勢は傾きごとに逆運動学で
+        #   求めておいたもの（腰の位置 3・向き 4・関節角度 23。g1_ladder_mid_poses.py）。傾きの段階ごとの表にする
+        self.mid_cfg = env_cfg["reset"].get("mid")
+        if self.mid_cfg:
+            cc0 = curriculum_cfg
+            keys = sorted(float(k) for k in self.mid_cfg["poses"])
+            rows = []
+            for lv in range(self.num_levels):
+                ang = cc0["angle_min"] + lv * cc0["angle_step"]
+                k = min(keys, key=lambda x: abs(x - ang))
+                rows.append(self.mid_cfg["poses"][k] if k in self.mid_cfg["poses"] else self.mid_cfg["poses"][str(k)])
+            self.mid_qpos_table = torch.tensor(rows, **f)  # [段階, 30]
+            self.mid_pose_angles = torch.tensor([min(keys, key=lambda x: abs(x - (cc0["angle_min"] + lv * cc0["angle_step"])))
+                                                 for lv in range(self.num_levels)], **f)
 
         self.extras = dict()
         self.reset()
@@ -329,7 +343,9 @@ class G1LadderEnv:
             rung.set_pos(self.rung_s[k] * self.ladder_u)
 
     def set_eval_start(self, start, hang_rung=None):
-        """評価用：開始の仕方を固定する（"ground"・"hang"・"stand"）。"""
+        """評価用：開始の仕方を固定する（"ground"・"hang"・"stand"・"mid"）。"""
+        if start == "mid" and not getattr(self, "mid_cfg", None):
+            raise ValueError("この実験の設定には、はしごの途中の姿勢からの開始（reset.mid）がありません（v15k 以降の版で使えます）。")
         if start == "hang" and not self.hang_cfg:
             raise ValueError("この実験の設定には、ぶら下がった姿勢からの開始（reset.hang）がありません（v3 以降の版で使えます）。")
         if start == "stand" and not self.stand_cfg:
@@ -948,7 +964,27 @@ class G1LadderEnv:
             stand_anchor = stand_pelvis[:, None, :] + self.stand_palm_offset[None]
             _, _, _, d_anchor, _ = self._ladder_coords(stand_anchor)
             stand_grip = stand[:, None] & (d_anchor < self.env_cfg["grip"]["grab_distance"])
-        self.is_hang = torch.where(mask, hang | stand, self.is_hang)
+        # 一部の環境は、はしごの途中の姿勢（両足 2 段目・両手 4 段目、しゃがんだ姿勢）から始める（v15k。逆向きのカリキュラム）
+        #   v15j のルールでは、ここが「手の番」。手を 5 段目へ握り直す練習を、足 2 段目で止まることを覚える前からできるようにする
+        #   （v15j では、方策が足を 1 段目から 3 段目へ一気に上げる癖のまま、足 2 段目で手を伸ばす経験がほとんどなかった）
+        mid = torch.zeros_like(mask)
+        use_mid = bool(getattr(self, "mid_cfg", None)) and (self.fixed_angle is None or self.eval_start == "mid")
+        if use_mid:
+            mc = self.mid_cfg
+            if self.eval_start == "mid":
+                mid = mask.clone()
+                lv_idx = torch.full_like(self.levels, int(torch.argmin(torch.abs(self.mid_pose_angles - self.fixed_angle))))
+            else:
+                mid = mask & ~review & ~hang & ~stand & (torch.rand((self.num_envs,), device=gs.device) < mc["prob"])
+                lv_idx = self.levels.clamp(0, self.num_levels - 1)
+            mid_q = self.mid_qpos_table[lv_idx]
+            qpos = torch.where(mid[:, None], mid_q, qpos)
+            # 握った位置：逆運動学で手のひらを置いた位置（横棒の中心から、ロボット側へ 4 cm・左右 ±0.17 m）
+            hk = mc["hand_rung"]
+            mid_anchor = (self.rung_s[hk] * self.ladder_u + 0.04 * self.ladder_nrm)[:, None, :].repeat(1, 2, 1)
+            mid_anchor[:, 0, 1] = 0.17
+            mid_anchor[:, 1, 1] = -0.17
+        self.is_hang = torch.where(mask, hang | stand | mid, self.is_hang)
         self.is_hang_only = torch.where(mask, hang, self.is_hang_only)
         # 今のエピソードの目標の段：床からの開始は環境ごとの目標の段、ぶら下がり・床に立って握った姿勢からの開始と
         # 評価のときは一番上の目標（task.target_rung）
@@ -961,6 +997,8 @@ class G1LadderEnv:
             # 届かない段にして、手を上の段へ握り直す練習をさせる（v14 までは上限の段が目標で、足を下ろすだけで成功できた）
             hang_target = (m + self.hang_cfg["target_offset"]).clamp(0, self.num_rungs - 1)
             ep_target = torch.where(hang, hang_target, ep_target)
+        if use_mid:
+            ep_target = torch.where(mid, torch.full_like(ep_target, self.mid_cfg["target"]), ep_target)
         self.episode_target = torch.where(mask, ep_target, self.episode_target)
         self.target_height = self.rung_s[self.episode_target] * torch.sin(self.ladder_angle)
         qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
@@ -997,6 +1035,11 @@ class G1LadderEnv:
             self.gripped_once |= hang[:, None]  # 最初から握っている分には、初めて握った報酬を出さない
             self.grip_anchor = torch.where(hang[:, None, None], hang_anchor, self.grip_anchor)
             self.grip_rung = torch.where(hang[:, None], m[:, None].expand(-1, 2), self.grip_rung)
+        if use_mid:
+            self.grip |= mid[:, None]
+            self.gripped_once |= mid[:, None]
+            self.grip_anchor = torch.where(mid[:, None, None], mid_anchor, self.grip_anchor)
+            self.grip_rung = torch.where(mid[:, None], torch.full_like(self.grip_rung, self.mid_cfg["hand_rung"]), self.grip_rung)
         if use_stand:
             self.grip |= stand_grip
             self.gripped_once |= stand[:, None]
