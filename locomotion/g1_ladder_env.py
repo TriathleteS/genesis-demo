@@ -194,6 +194,7 @@ class G1LadderEnv:
         self.hand_turn = torch.zeros((n,), **b)  # 今が「手の番」か（手と足の段の差が小さい）
         self.out_of_turn = torch.zeros((n,), **f)  # 今のステップで、手の番なのに足の最高の段を上げた数
         self.feet_turn_best = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # 足の番に上げた足の最高の段
+        self.feet_seen_best = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # 各足が 0.2 秒以上乗った最高の段（腰との高さは問わない。v15d）
         self.release_block = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 強制的に離した手が握れない残りステップ数（v15b）
         self.forced_releases = torch.zeros((n,), **f)  # 今のステップで強制的に離した手の数（v15b。記録用）
         self.body_best = torch.zeros((n,), **f)  # 到達度のうち重心・足の分の最高記録（手の番の間は増やさない）
@@ -487,6 +488,13 @@ class G1LadderEnv:
         # v15b：強制的に離した手は、しばらく握れない（すぐ同じ段を握り直して、片手で支える練習を避けないように）
         within &= self.release_block == 0
         self.release_block = (self.release_block - 1).clamp(min=0)
+        # v15d：横棒を下からつかめない：握る瞬間の手のひらの中心が、横棒の中心より min_palm_height_above_rung [m] 以上
+        #   下にあったら握れない。v15c では、手を上の段へ移すときに、手のひらを少し上（水平から 25〜28°）に向けて横棒の
+        #   下に当てて（中心から約 6 cm 下）握っていた。手の向きの条件（palm_down_cos・palm_facing_cos）だけでは防げなかった
+        min_dz = gc.get("min_palm_height_above_rung")
+        if min_dz is not None:
+            near_z = self.rung_s[kmin] * torch.sin(self.ladder_angle)[:, None]  # 一番近い横棒の中心の高さ
+            within &= self.palms_pos[:, :, 2] - near_z > min_dz
         new_grip = command & within & ~self.grip
         # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
         self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
@@ -536,6 +544,8 @@ class G1LadderEnv:
         turn_cfg = tc.get("turn_taking")
         H_before = self.hands_best_rung.max(dim=1).values
         F_before = self.feet_best_rung.max(dim=1).values
+        if turn_cfg is not None and turn_cfg.get("ignore_base_height", False):
+            F_before = self.feet_seen_best.max(dim=1).values  # v15d：腰との高さを問わずに数えた足の段
         if turn_cfg is not None:
             self.hand_turn = (H_before - F_before) <= turn_cfg["hand_turn_max_gap"]
         else:
@@ -607,6 +617,7 @@ class G1LadderEnv:
         self.feet_hold_steps = torch.where(same, self.feet_hold_steps + 1, torch.zeros_like(self.feet_hold_steps))
         self.feet_prev_rung = self.feet_rung_idx.clone()
         held = self.feet_hold_steps * self.dt >= tc.get("foot_hold_time_s", 0.0)
+        held_any_height = torch.where(held, self.feet_rung_idx, torch.full_like(self.feet_rung_idx, -1))  # v15d で使う
         # v7：腰より foot_below_base 以上低い段だけ数える（手と同じ高さの段に足を蹴り上げて掛ける動きを数えない）
         below = tc.get("foot_below_base")
         if below is not None:
@@ -614,7 +625,26 @@ class G1LadderEnv:
             held &= rung_z < self.base_pos[:, 2:3] - below
         held_rung = torch.where(held, self.feet_rung_idx, torch.full_like(self.feet_rung_idx, -1))
         higher = held_rung > self.feet_best_rung
-        if turn_cfg is not None:
+        if turn_cfg is not None and turn_cfg.get("ignore_base_height", False):
+            # v15d：手と足の番・順番違反の判定では、足の段を「同じ段に 0.2 秒以上乗った」だけで数える（腰より 0.35 m 以上低い、
+            #   という v7 の条件を使わない）。v15c では、しゃがんで（腰との高さの条件を満たさない形で）3 段目に立つと、加点も
+            #   減点もされなかったので、手の番のまま足を上げていた。足の段の加点（+3）は、これまでどおり v7 の条件付き
+            self.feet_seen_best = torch.where(fresh_hang[:, None], self.feet_rung_idx, self.feet_seen_best)
+            self.feet_turn_best = torch.where(fresh_hang, self.feet_rung_idx.max(dim=1).values, self.feet_turn_best)
+            new_seen = held_any_height > self.feet_seen_best  # この足が初めて乗った段（腰との高さは問わない）
+            beyond = held_any_height > self.feet_turn_best[:, None]  # 足の番に上げた最高の段より上
+            # 足の番に上げてよいのは 1 段だけ。ぶら下がった姿勢から始めて、足がまだどの段にも乗っていないときは、どの段でもよい
+            first_from_hang = (self.is_hang_only & (self.feet_turn_best < 0))[:, None]
+            allowed = ~self.hand_turn[:, None] & ((held_any_height <= self.feet_turn_best[:, None] + 1) | first_from_hang)
+            self.out_of_turn = (new_seen & beyond & ~allowed).to(gs.tc_float).sum(dim=1)
+            legit = new_seen & beyond & allowed
+            self.feet_turn_best = torch.maximum(
+                self.feet_turn_best, torch.where(legit, held_any_height, torch.full_like(held_any_height, -1)).max(dim=1).values
+            )
+            self.feet_seen_best = torch.maximum(self.feet_seen_best, held_any_height)
+            # 足の段の加点は、足の番に正しく上げた段（とそこまで追いつかせた段）だけ
+            higher = higher & (held_rung <= self.feet_turn_best[:, None])
+        elif turn_cfg is not None:
             # v15：足が、足の番に上げた最高の段（feet_turn_best）より上の段に乗ったら、足の番なら加点（記録を更新）、
             # 手の番なら減点。もう一方の足をその段まで追いつかせるのは、いつでも加点。
             # （手の番に片足で上げた段は記録に入れないので、もう一方の足を追いつかせても加点されない）
@@ -928,6 +958,7 @@ class G1LadderEnv:
             buf.masked_fill_(mask, 0.0)
         self.reach_next_rung.masked_fill_(mask, -1)
         self.feet_turn_best.masked_fill_(mask, -1)
+        self.feet_seen_best.masked_fill_(m1, -1)
         self.release_block.masked_fill_(m1, 0)
         self.forced_releases.masked_fill_(mask, 0.0)
         self.hand_turn.masked_fill_(mask, False)

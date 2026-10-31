@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15c。以前の版は g1-ladder, g1-ladder-v2〜v15b）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15d。以前の版は g1-ladder, g1-ladder-v2〜v15c）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -151,6 +151,11 @@ def get_cfgs():
             # 握っている間、手のひらの向きと握った横棒への向きのなす角の cos がこれ未満になったら外れる（v13b。0.0 = 90°）。
             # v13 では握った後に手首を回し、握っている時間の 9 割近くで手の甲や側面を横棒に当てていた
             "palm_release_cos": 0.0,
+            # 横棒を下からつかめない（v15d）：握る瞬間の手のひらの中心が、横棒の中心よりこの値 [m] 以上下にあったら握れない。
+            # v15c では、手を上の段へ移すときに、少し上向きの手のひらを横棒の下に当てて（中心から約 6 cm 下）握っていた。
+            # -0.02 では、ぶら下がり開始（90°）で握り直すときに手のひらが 2 cm ほど沈んでいて握れず、16 体中 11 体が落ちた
+            #（-0.03 で 4 体。v15c の判定では 1 体）
+            "min_palm_height_above_rung": -0.03,
             # v13b で 3000 → 10000 N/m に（3000 では片手で 150 N を支えると手のひらが約 5 cm 沈み、横棒との隙間に見えた。
             # 10000 で約 1.7 cm。15000 まで試して計算が不安定にならないことを確認）。減衰は硬さの平方根に比例させた
             "stiffness": 10000.0,  # [N/m]
@@ -233,7 +238,9 @@ def get_cfgs():
             # 繰り返しを促す（v11a・v12・v14 では、手を握り直さずに足だけで届く段までしか登らなかった）。
             # 3 にすると、床から：手 4 段目を握る → 足 1 段目 → 手 5 段目 → 足 2 段目 → …… の順になる
             # v15c：1 回の足の番に上げてよいのは 1 段だけ（one_rung_per_turn）
-            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True},
+            # v15d：番と順番違反の判定では、足の段を「同じ段に 0.2 秒以上乗った」だけで数える（ignore_base_height。
+            #   足の段の加点は従来どおり foot_below_base の条件付き）。v15c では、しゃがんで 3 段目に立つと数えられなかった
+            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True},
         },
     }
     obs_cfg = {
@@ -302,7 +309,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15c", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15d", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
