@@ -197,6 +197,8 @@ class G1LadderEnv:
         self.out_of_turn = torch.zeros((n,), **f)  # 今のステップで、手の番なのに足の最高の段を上げた数
         self.feet_turn_best = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # 足の番に上げた足の最高の段
         self.feet_seen_best = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # 各足が 0.2 秒以上乗った最高の段（腰との高さは問わない。v15d）
+        self.hand_pending_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # 後払い待ちの握り直しの段（v15j）
+        self.hand_pending_steps = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)
         self.release_block = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 強制的に離した手が握れない残りステップ数（v15b）
         self.forced_releases = torch.zeros((n,), **f)  # 今のステップで強制的に離した手の数（v15b。記録用）
         self.body_best = torch.zeros((n,), **f)  # 到達度のうち重心・足の分の最高記録（手の番の間は増やさない）
@@ -689,7 +691,21 @@ class G1LadderEnv:
             H_now = torch.where(fresh_hang, self.grip_rung.max(dim=1).values, H_before)
             raise_H = hand_rung > H_now[:, None]
             rewarded_hand = hand_higher & ~(raise_H & ~self.hand_turn[:, None])
-        self.new_hand_rungs = rewarded_hand.to(gs.tc_float).sum(dim=1)
+        hold_s = tc.get("hand_rung_hold_s")
+        if hold_s is None:
+            self.new_hand_rungs = rewarded_hand.to(gs.tc_float).sum(dim=1)
+        else:
+            # v15j：握り直しの加点は後払い。握った段を hold_s 秒握り続けたら与える（途中で離すか、順番違反で打ち切られたら
+            #   与えない）。v15i では、手の番なのに足を一気に上げてしゃがみ、順番違反が数えられるまでの 0.2 秒の間に上の段を
+            #   握って加点を受け取ってから打ち切られていた。手の番・足の番の切り替えは、握った瞬間のまま
+            self.hand_pending_rung = torch.where(rewarded_hand, hand_rung, self.hand_pending_rung)
+            self.hand_pending_steps = torch.where(rewarded_hand, torch.zeros_like(self.hand_pending_steps), self.hand_pending_steps)
+            pending = self.hand_pending_rung >= 0
+            still = self.grip & (self.grip_rung == self.hand_pending_rung)
+            self.hand_pending_steps = torch.where(pending & still, self.hand_pending_steps + 1, self.hand_pending_steps)
+            pay = pending & still & (self.hand_pending_steps * self.dt >= hold_s)
+            self.new_hand_rungs = pay.to(gs.tc_float).sum(dim=1)
+            self.hand_pending_rung = torch.where(pay | (pending & ~still), torch.full_like(self.hand_pending_rung, -1), self.hand_pending_rung)
         self.hands_best_rung = torch.where(hand_higher, hand_rung, self.hands_best_rung)
 
         # 手を次の段へ移す途中の報酬（v15）：「手の番」の間、どちらかの手のひらが「今の H の 1 つ上の段」に近づいた度合い
@@ -1004,6 +1020,8 @@ class G1LadderEnv:
         self.feet_turn_best.masked_fill_(mask, -1)
         self.feet_seen_best.masked_fill_(m1, -1)
         self.release_block.masked_fill_(m1, 0)
+        self.hand_pending_rung.masked_fill_(m1, -1)
+        self.hand_pending_steps.masked_fill_(m1, 0)
         self.forced_releases.masked_fill_(mask, 0.0)
         self.hand_turn.masked_fill_(mask, False)
         self.flight_steps.masked_fill_(mask, 0)

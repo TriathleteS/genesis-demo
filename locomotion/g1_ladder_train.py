@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15i。以前の版は g1-ladder, g1-ladder-v2〜v15h）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15j。以前の版は g1-ladder, g1-ladder-v2〜v15i）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -233,6 +233,9 @@ def get_cfgs():
             "max_flight_steps": 5,  # 体のどこも触れず、握ってもいない状態が 0.1 秒続いたら失敗（跳躍の禁止）
             # 足がはしごの面よりこの距離 [m] 以上向こう側に入るか、腰がはしごの面より向こう側に入ったら失敗（v2。はしごの下にもぐり込む動きの禁止）
             "max_foot_behind": 0.05,
+            # 手の握り直しの加点は後払い（v15j）：握った段をこの時間 [s] 握り続けたら与える（途中で離すか、順番違反で打ち切られたら
+            # 与えない）。v15i では、順番違反が数えられるまでの 0.2 秒の間に上の段を握り、加点を受け取ってから打ち切られていた
+            "hand_rung_hold_s": 0.3,
             # 手と足の順番（v15）：手が握った最高の段と足が乗った最高の段（床は -1）の差がこれ以下なら「手の番」、
             # より大きければ「足の番」。手の番には手を 1 段上げると加点・足を上げると減点、足の番には足を 1 段上げると加点。
             # 到達度のうち重心・足の分も足の番の間だけ増える。人がはしごを登るときの「手を 1 段上げる → 足を 1 段上げる」の
@@ -253,7 +256,10 @@ def get_cfgs():
             #   2 cm）に近づいた分も数える（distance [m] 以内で増え始める）。度合いは 1 段階目と 2 段階目の半分ずつ
             "hand_reach_target": {"up": 0.06, "toward_robot": 0.10, "max_palm_up_cos": 0.5,
                                   "stage2": {"up": 0.04, "toward_robot": 0.02, "distance": 0.15}},
-            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True,
+            # v15j：手の番になる差を 3 → 2 段以下に。床から：手 4 段目 → 足 1 段目 → 足 2 段目 → 手 5 段目 → 足 3 段目 →
+            #   手 6 段目 → ……（手は足より 2〜3 段上）。v15i では、手を上の段へ移すとき、足を一気に 1 段目から 3 段目へ
+            #   上げてしゃがんでから上の段を上から握り、順番違反で打ち切られていた
+            "turn_taking": {"hand_turn_max_gap": 2, "one_rung_per_turn": True, "ignore_base_height": True,
                             "terminate_on_violation": True, "success_requires_order": True},
         },
     }
@@ -325,7 +331,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15i", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15j", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
