@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15e。以前の版は g1-ladder, g1-ladder-v2〜v15d）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15f。以前の版は g1-ladder, g1-ladder-v2〜v15e）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -243,8 +243,9 @@ def get_cfgs():
             #   足の段の加点は従来どおり foot_below_base の条件付き）。v15c では、しゃがんで 3 段目に立つと数えられなかった
             # v15e：順番違反をしたらエピソードを打ち切る（terminate_on_violation。v15〜v15d は減点だけで、成功の報酬
             #   +10 と目標の段に留まる毎秒 +10 の方が大きく、減点を払って足だけで登っていた）
+            # v15f：成功・目標の段に立っている判定にも順番を反映（success_requires_order。両足が足の番に正しく上げた段以下）
             "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True,
-                            "terminate_on_violation": True},
+                            "terminate_on_violation": True, "success_requires_order": True},
         },
     }
     obs_cfg = {
@@ -313,7 +314,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15e", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15f", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
