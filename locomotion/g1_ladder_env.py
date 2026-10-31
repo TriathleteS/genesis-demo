@@ -205,6 +205,7 @@ class G1LadderEnv:
         self.reach_next_best = torch.zeros((n,), **f)  # 手の番の間、手が次の段に近づいた度合いの最高記録
         self.reach_next_rung = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # その「次の段」
         self.reach_next_gain = torch.zeros((n,), **f)
+        self.reach_counted = torch.ones((n, 2), **b)  # 手を移す途中の報酬で測っている手（v15o）
         self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
 
         # はしごの状態（環境ごと）
@@ -774,13 +775,19 @@ class G1LadderEnv:
                     p_hand = 0.5 * p_hand + 0.5 * p2
                 if use_min:
                     # v15n：すでに目標の段（以上）を握っている手は数えない（低い方の手を上の段へ運ぶ動きだけを測る）
-                    p_hand = p_hand * ~(self.grip & (self.grip_rung >= nxt[:, None]))
+                    counted = ~(self.grip & (self.grip_rung >= nxt[:, None]))
+                    p_hand = p_hand * counted
                 p_next = p_hand.max(dim=1).values
             else:
                 dv = self.palms_pos - rung_pt
                 d = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2).min(dim=1).values  # 横棒の中心線までの距離（左右は無視）
                 p_next = (1.0 - d / tc["reach_distance"]).clamp(0.0, 1.0)
             new_target = (nxt != self.reach_next_rung) | fresh_hang
+            if use_min and rt is not None and turn_cfg.get("reset_reach_on_hand_change", False):
+                # v15o：測る手が変わったとき（片手が目標の段を握った・離したとき）も、その時点の度合いを基準に測り直す。
+                #   v15n では、右手が 5 段目に近づいた記録がそのまま残り、左手が右手と同じくらい近づくまで報酬が出なかった
+                new_target = new_target | (counted != self.reach_counted).any(dim=1)
+                self.reach_counted = counted
             self.reach_next_rung = nxt
             self.reach_next_best = torch.where(new_target, p_next, self.reach_next_best)
             active = self.hand_turn & (H >= 0) & (H + 1 < self.num_rungs) & supported
@@ -1080,6 +1087,7 @@ class G1LadderEnv:
         for buf in (self.out_of_turn, self.body_best, self.reach_next_best, self.reach_next_gain):
             buf.masked_fill_(mask, 0.0)
         self.reach_next_rung.masked_fill_(mask, -1)
+        self.reach_counted.masked_fill_(m1, True)
         self.feet_turn_best.masked_fill_(mask, -1)
         self.feet_seen_best.masked_fill_(m1, -1)
         self.release_block.masked_fill_(m1, 0)

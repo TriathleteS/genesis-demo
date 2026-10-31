@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15n。以前の版は g1-ladder, g1-ladder-v2〜v15m）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15o。以前の版は g1-ladder, g1-ladder-v2〜v15n）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -283,7 +283,9 @@ def get_cfgs():
             #   左手も 5 段目へ上げてから足の番。手を移す途中の報酬も、低い方の手を「手の段の 1 つ上」へ運ぶ動きで測る。
             #   v15m では、右手を 5 段目へ握り直したあと、足を 3 段目から 4 段目へ上げられずに止まっていた（4 段目は左手が
             #   握っていて足を乗せにくく、片手 5 段目では体を引き上げにくいと考えた）
-            "turn_taking": {"hand_level": "min", "hand_turn_max_gap": 1, "max_rungs_per_turn": 2, "one_rung_per_turn": True, "ignore_base_height": True,
+            # v15o：測る手が変わったとき（片手が目標の段を握ったとき）も、手を移す途中の報酬の記録を測り直す
+            #   （reset_reach_on_hand_change。v15n では右手の記録が残り、左手を運ぶ途中に報酬がほとんど出なかった）
+            "turn_taking": {"hand_level": "min", "reset_reach_on_hand_change": True, "hand_turn_max_gap": 1, "max_rungs_per_turn": 2, "one_rung_per_turn": True, "ignore_base_height": True,
                             "terminate_on_violation": True, "success_requires_order": True},
         },
     }
@@ -356,7 +358,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15n", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15o", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
