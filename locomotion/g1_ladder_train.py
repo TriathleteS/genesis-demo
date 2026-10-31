@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15b。以前の版は g1-ladder, g1-ladder-v2〜v15）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15c。以前の版は g1-ladder, g1-ladder-v2〜v15b）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -232,7 +232,8 @@ def get_cfgs():
             # 到達度のうち重心・足の分も足の番の間だけ増える。人がはしごを登るときの「手を 1 段上げる → 足を 1 段上げる」の
             # 繰り返しを促す（v11a・v12・v14 では、手を握り直さずに足だけで届く段までしか登らなかった）。
             # 3 にすると、床から：手 4 段目を握る → 足 1 段目 → 手 5 段目 → 足 2 段目 → …… の順になる
-            "turn_taking": {"hand_turn_max_gap": 3},
+            # v15c：1 回の足の番に上げてよいのは 1 段だけ（one_rung_per_turn）
+            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True},
         },
     }
     obs_cfg = {
@@ -252,7 +253,9 @@ def get_cfgs():
             "new_rung": 3.0,  # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
             "new_hand_rung": 2.0,  # 片手がこのエピソードで初めて 1 つ上の段を握ったとき（もう一方の手か両足で体を支えているときだけ。v7）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
-            "out_of_turn": -1.0,  # 手の番なのに、足の最高の段を上げたとき（v15。終了にはしない）
+            # 順番違反：手の番なのに足の最高の段を上げた、または足の番に 2 段以上上げたとき（v15。終了にはしない）。
+            # v15・v15b は -1。v15c で足の段の加点と同じ -3 に（段を飛ばしても得をしないように）
+            "out_of_turn": -3.0,
             "hand_reach": 3.0,  # 手の番の間、手のひらが次の段に近づいた度合いの最高記録の更新量 × 3（v15。手を移す途中の手がかり）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
@@ -299,7 +302,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15b", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15c", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
