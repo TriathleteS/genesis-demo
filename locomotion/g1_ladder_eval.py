@@ -14,7 +14,7 @@
     uv run python locomotion/g1_ladder_eval.py --start stand --angle 90
                                                                    # 床に立ったまま、肩より少し上の段を両手で握った姿勢から始める
 
-1 回の挑戦は最大 15 秒。転倒するか、15 秒たつか、4 秒間進まなかった（停滞）と、自動ではしごの手前に戻って次の挑戦を始める。
+1 回の挑戦は最大 15 秒。転倒するか、15 秒たつか、4 秒間進まなかった（停滞）か、手と足の順番を守らなかった（v15e 以降）と、自動ではしごの手前に戻って次の挑戦を始める。
 成功：両足が目標の段（v10・v13 は下から 3 段目、v11a・v12 は 6 段目）以上の横棒に乗り、少なくとも片手で横棒を握っている。
 
 ビューアー上のキー操作:
@@ -48,7 +48,7 @@ from g1_ladder_env import G1LadderEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15d", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15e", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--angle", type=float, default=85.0, help="はしごの傾き（床からの角度）[deg]")
     parser.add_argument(
@@ -194,6 +194,8 @@ def main():
                         reason = "時間切れ"
                     elif bool(getattr(env, "last_stalled", torch.zeros(1, dtype=torch.bool))[0]):
                         reason = "停滞：4 秒間進まなかった"
+                    elif bool(getattr(env, "last_violated", torch.zeros(1, dtype=torch.bool))[0]):
+                        reason = "順番違反：手の番に足を上げた、または足の番に 2 段以上上げた"
                     else:
                         reason = "転倒"
                     finish_trial(reason)

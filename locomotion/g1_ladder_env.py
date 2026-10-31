@@ -183,6 +183,8 @@ class G1LadderEnv:
         self.reset_buf = torch.ones((n,), **b)
         self.time_out_buf = torch.zeros((n,), **b)
         self.stalled = torch.zeros((n,), **b)  # 到達度が長い間更新されず、打ち切った（v5）
+        self.violated = torch.zeros((n,), **b)  # 手と足の順番を守らず、打ち切った（v15e）
+        self.last_violated = torch.zeros((n,), **b)
         self.stall_steps = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)  # 到達度の最高記録が更新されていないステップ数
         self.feet_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各足が乗った最高の段
         self.feet_hold_steps = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 各足が同じ段に乗り続けているステップ数（v6）
@@ -427,7 +429,9 @@ class G1LadderEnv:
 
         # 終了判定
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf = self.time_out_buf | self.fell | self.stalled | self.scene.rigid_solver.get_error_envs_mask()
+        self.reset_buf = (
+            self.time_out_buf | self.fell | self.stalled | self.violated | self.scene.rigid_solver.get_error_envs_mask()
+        )
 
         # 報酬
         self.rew_buf.zero_()
@@ -442,6 +446,7 @@ class G1LadderEnv:
         self.last_just_succeeded = self.just_succeeded.clone()
         self.last_on_target = self.on_target.clone()
         self.last_stalled = self.stalled.clone()
+        self.last_violated = self.violated.clone()
         self._reset_idx(self.reset_buf)
         self._update_observation()
 
@@ -637,6 +642,10 @@ class G1LadderEnv:
             first_from_hang = (self.is_hang_only & (self.feet_turn_best < 0))[:, None]
             allowed = ~self.hand_turn[:, None] & ((held_any_height <= self.feet_turn_best[:, None] + 1) | first_from_hang)
             self.out_of_turn = (new_seen & beyond & ~allowed).to(gs.tc_float).sum(dim=1)
+            # v15e：順番違反をしたら、そのエピソードを打ち切る（減点だけの v15〜v15d では、成功の報酬の方が大きく、
+            #   減点を払って足だけで目標の段まで登っていた）。転倒の減点・到達度の取り消しはしない
+            if turn_cfg.get("terminate_on_violation", False):
+                self.violated = self.out_of_turn > 0
             legit = new_seen & beyond & allowed
             self.feet_turn_best = torch.maximum(
                 self.feet_turn_best, torch.where(legit, held_any_height, torch.full_like(held_any_height, -1)).max(dim=1).values
@@ -948,6 +957,7 @@ class G1LadderEnv:
         self.support_steps.masked_fill_(mask, 0)
         self.stall_steps.masked_fill_(mask, 0)
         self.stalled.masked_fill_(mask, False)
+        self.violated.masked_fill_(mask, False)
         self.new_rungs.masked_fill_(mask, 0.0)
         self.feet_best_rung.masked_fill_(m1, -1)
         self.feet_hold_steps.masked_fill_(m1, 0)

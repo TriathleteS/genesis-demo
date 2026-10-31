@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15d。以前の版は g1-ladder, g1-ladder-v2〜v15c）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15e。以前の版は g1-ladder, g1-ladder-v2〜v15d）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -44,7 +44,8 @@ def get_train_cfg(exp_name):
             # よじ登り（v5〜v9）では 0.01 で行動のばらつきが増え続けた。はしご v1 の 0.003 では逆に
             # 800 イテレーションで 0.39 まで下がり、試行錯誤が止まったので、その間の 0.005 にする（v2）
             # v8：v5〜v7 で行動のばらつきが 1.5〜1.7 まで増え続けたので、0.003 に戻す（動き方を覚えたモデルからの続きなので）
-            "entropy_coef": 0.003,
+            # v15e：v15b〜v15d で行動のばらつきが 1.95 → 2.36 と増え続けたので、0.003 → 0.001 に
+            "entropy_coef": 0.001,
             "gamma": 0.99,
             "lam": 0.95,
             "learning_rate": 0.001,
@@ -240,7 +241,10 @@ def get_cfgs():
             # v15c：1 回の足の番に上げてよいのは 1 段だけ（one_rung_per_turn）
             # v15d：番と順番違反の判定では、足の段を「同じ段に 0.2 秒以上乗った」だけで数える（ignore_base_height。
             #   足の段の加点は従来どおり foot_below_base の条件付き）。v15c では、しゃがんで 3 段目に立つと数えられなかった
-            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True},
+            # v15e：順番違反をしたらエピソードを打ち切る（terminate_on_violation。v15〜v15d は減点だけで、成功の報酬
+            #   +10 と目標の段に留まる毎秒 +10 の方が大きく、減点を払って足だけで登っていた）
+            "turn_taking": {"hand_turn_max_gap": 3, "one_rung_per_turn": True, "ignore_base_height": True,
+                            "terminate_on_violation": True},
         },
     }
     obs_cfg = {
@@ -309,7 +313,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15d", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15e", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
