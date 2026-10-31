@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v14。以前の版は g1-ladder, g1-ladder-v2〜v13c）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15。以前の版は g1-ladder, g1-ladder-v2〜v14）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -167,7 +167,11 @@ def get_cfgs():
             # はしごにぶら下がった姿勢から始めるエピソード（v3。逆向きのカリキュラム）
             "hang": {
                 "prob": 0.3,  # エピソードのこの割合をぶら下がった姿勢から始める（段階の更新には使わない）
-                "rungs": (5, 10),  # 握る段（下から 6〜11 段目。足が床から浮く高さ。v10・v13〜v13c は 6〜8 段目）
+                "rungs": (5, 9),  # 握る段（下から 6〜10 段目。足が床から浮く高さ。v10・v13〜v13c は 6〜8 段目、v11a・v12・v14 は 6〜11 段目）
+                # 目標の段 = 握った段 + target_offset（v15。-1 ＝すぐ下の段。手を動かさずに足を下ろすだけでは届かない）。
+                # v14 までは目標の上限（task.target_rung）で、足を下ろすだけで成功できた。一番上の 12 段目には手を移せないので、
+                # v15 で握る段を 6〜10 段目に
+                "target_offset": -1,
                 "standoff": 0.05,  # 手のひらを横棒の中心線から、ロボットの側にこの距離 [m] 離して置く
                 # 腕を前に上げた姿勢（手のひらは腰から前に約 0.14 m、上に約 0.56 m）
                 "arm_pose": {
@@ -219,6 +223,12 @@ def get_cfgs():
             "max_flight_steps": 5,  # 体のどこも触れず、握ってもいない状態が 0.1 秒続いたら失敗（跳躍の禁止）
             # 足がはしごの面よりこの距離 [m] 以上向こう側に入るか、腰がはしごの面より向こう側に入ったら失敗（v2。はしごの下にもぐり込む動きの禁止）
             "max_foot_behind": 0.05,
+            # 手と足の順番（v15）：手が握った最高の段と足が乗った最高の段（床は -1）の差がこれ以下なら「手の番」、
+            # より大きければ「足の番」。手の番には手を 1 段上げると加点・足を上げると減点、足の番には足を 1 段上げると加点。
+            # 到達度のうち重心・足の分も足の番の間だけ増える。人がはしごを登るときの「手を 1 段上げる → 足を 1 段上げる」の
+            # 繰り返しを促す（v11a・v12・v14 では、手を握り直さずに足だけで届く段までしか登らなかった）。
+            # 3 にすると、床から：手 4 段目を握る → 足 1 段目 → 手 5 段目 → 足 2 段目 → …… の順になる
+            "turn_taking": {"hand_turn_max_gap": 3},
         },
     }
     obs_cfg = {
@@ -238,6 +248,8 @@ def get_cfgs():
             "new_rung": 3.0,  # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
             "new_hand_rung": 2.0,  # 片手がこのエピソードで初めて 1 つ上の段を握ったとき（もう一方の手か両足で体を支えているときだけ。v7）
             "termination": -2.0,  # 転倒したとき（このエピソードで得た到達度の報酬も取り消す）
+            "out_of_turn": -1.0,  # 手の番なのに、足の最高の段を上げたとき（v15。終了にはしない）
+            "hand_reach": 3.0,  # 手の番の間、手のひらが次の段に近づいた度合いの最高記録の更新量 × 3（v15。手を移す途中の手がかり）
         },
         # 毎ステップ与える報酬（1 秒あたりの値。内部で dt を掛ける）
         "dense_scales": {
@@ -282,7 +294,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v14", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
