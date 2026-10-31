@@ -666,7 +666,9 @@ class G1LadderEnv:
             beyond = held_any_height > self.feet_turn_best[:, None]  # 足の番に上げた最高の段より上
             # 足の番に上げてよいのは 1 段だけ。ぶら下がった姿勢から始めて、足がまだどの段にも乗っていないときは、どの段でもよい
             first_from_hang = (self.is_hang_only & (self.feet_turn_best < 0))[:, None]
-            allowed = ~self.hand_turn[:, None] & ((held_any_height <= self.feet_turn_best[:, None] + 1) | first_from_hang)
+            # 足の番に上げてよいのは max_rungs_per_turn 段まで（v15c〜v15l は 1 段。v15m で 2 段に）
+            k_up = turn_cfg.get("max_rungs_per_turn", 1)
+            allowed = ~self.hand_turn[:, None] & ((held_any_height <= self.feet_turn_best[:, None] + k_up) | first_from_hang)
             self.out_of_turn = (new_seen & beyond & ~allowed).to(gs.tc_float).sum(dim=1)
             # v15e：順番違反をしたら、そのエピソードを打ち切る（減点だけの v15〜v15d では、成功の報酬の方が大きく、
             #   減点を払って足だけで目標の段まで登っていた）。転倒の減点・到達度の取り消しはしない

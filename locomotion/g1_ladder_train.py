@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15l。以前の版は g1-ladder, g1-ladder-v2〜v15k）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15m。以前の版は g1-ladder, g1-ladder-v2〜v15l）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -182,7 +182,9 @@ def get_cfgs():
                 # 目標の段 = 握った段 + target_offset（v15。-1 ＝すぐ下の段。手を動かさずに足を下ろすだけでは届かない）。
                 # v14 までは目標の上限（task.target_rung）で、足を下ろすだけで成功できた。一番上の 12 段目には手を移せないので、
                 # v15 で握る段を 6〜10 段目に
-                "target_offset": -1,
+                # v15m で -1 → 0（握った段と同じ段）。手の番になる差を 1 段以下にしたので、すぐ下の段なら手を動かさずに
+                # 足だけで届く。同じ段なら、手を 1 段は上へ握り直す必要がある
+                "target_offset": 0,
                 "standoff": 0.05,  # 手のひらを横棒の中心線から、ロボットの側にこの距離 [m] 離して置く
                 # 腕を前に上げた姿勢（手のひらは腰から前に約 0.14 m、上に約 0.56 m）
                 "arm_pose": {
@@ -194,7 +196,10 @@ def get_cfgs():
             # はしごの途中の姿勢（両足 2 段目・両手 4 段目、しゃがんだ姿勢）から始めるエピソード（v15k。逆向きのカリキュラム）
             #   v15j のルールではここが「手の番」。手を 5 段目へ握り直し、足を 3 段目へ上げれば成功（目標 3 段目）
             "mid": {
-                "prob": 0.25,  # ぶら下がり・床に立って握る開始以外のエピソードのこの割合（ランダムな傾きで練習する分は除く）
+                # ぶら下がり・床に立って握る開始以外のエピソードのこの割合（ランダムな傾きで練習する分は除く）。
+                # v15m では使わない（0）：この姿勢（両足 2 段目・両手 4 段目）は v15j・v15l の順番（差 2 段で手の番）のためのもので、
+                # 方策は始めた直後に両手を離して 0.1 秒で打ち切られていた（v15l）
+                "prob": 0.0,
                 "hand_rung": 3,  # 握る段（0 が一番下。下から 4 段目）
                 "foot_rung": 1,  # 足を乗せる段（下から 2 段目）
                 "target": 2,  # 目標の段（下から 3 段目）
@@ -271,7 +276,10 @@ def get_cfgs():
             # v15j：手の番になる差を 3 → 2 段以下に。床から：手 4 段目 → 足 1 段目 → 足 2 段目 → 手 5 段目 → 足 3 段目 →
             #   手 6 段目 → ……（手は足より 2〜3 段上）。v15i では、手を上の段へ移すとき、足を一気に 1 段目から 3 段目へ
             #   上げてしゃがんでから上の段を上から握り、順番違反で打ち切られていた
-            "turn_taking": {"hand_turn_max_gap": 2, "one_rung_per_turn": True, "ignore_base_height": True,
+            # v15m：G1 のしゃがんで登る動き（v15i）に合わせ、手の番になる差を 2 → 1 段以下、足の番に上げてよい段を 1 → 2 段に。
+            #   床から：手 4 段目 → 足 1 段目 → 足 3 段目（一気に 2 段）→ 手 5 段目 → 足 4 段目（または 5 段目）→ 手 6 段目 → ……
+            #   v15i の動き（足を 1 段目から 3 段目へ上げてしゃがみ、5 段目を上から握る）がそのまま順番どおりになる
+            "turn_taking": {"hand_turn_max_gap": 1, "max_rungs_per_turn": 2, "one_rung_per_turn": True, "ignore_base_height": True,
                             "terminate_on_violation": True, "success_requires_order": True},
         },
     }
@@ -332,7 +340,8 @@ def get_cfgs():
         # 最高到達度が target_down_progress 未満で終わったら 1 段下げる。ぶら下がり・床に立って握った姿勢からの開始は常に上限の段が目標
         # （v11a でいきなり 6 段目を目標にしたら、床からの開始は v10 の目標だった 3 段目で止まったまま抜け出せなかった）
         # v13〜v13c では使わなかった（目標は 3 段目で固定）。v14 で再び使う（v13c の上から握る手で、握り直しが出るかを確かめる）
-        "target_init": 2,
+        # v15m で 2 → 3（下から 4 段目）。手の番になる差を 1 段にしたので、3 段目までは手を握り直さずに登れる
+        "target_init": 3,
         "target_down_progress": 0.5,
         # 補助の力：はしごに手か足が掛かっている間、体重 × assist_init の上向きの力を腰にかける
         "assist_init": 0.4,
@@ -343,7 +352,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15l", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15m", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
