@@ -699,9 +699,24 @@ class G1LadderEnv:
             H = self.hands_best_rung.max(dim=1).values
             nxt = (H + 1).clamp(max=self.num_rungs - 1)
             rung_pt = self.rung_s[nxt][:, None, None] * self.ladder_u[:, None, :]  # [n, 1, 3]
-            dv = self.palms_pos - rung_pt
-            d = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2).min(dim=1).values  # 横棒の中心線までの距離（左右は無視）
-            p_next = (1.0 - d / tc["reach_distance"]).clamp(0.0, 1.0)
+            rt = tc.get("hand_reach_target")
+            if rt is not None:
+                # v15g：目標を「次の段の横棒の少し上（上へ up [m]、ロボット側へ toward_robot [m]）」の点にし、手のひらが上を
+                #   向いている（真上となす角の cos が max_palm_up_cos より大きい）手は数えない。v15f では、離した手が手のひらを
+                #   上に向けて真下から横棒に近づき（中心から約 5.6 cm 下）、横棒の下面に当たって止まっていた。横棒の中心線
+                #   までの距離だけで測ると、真下から近づいても報酬がほぼ取り切れてしまい、上へ回り込む動きを促せなかった
+                up = torch.tensor([0.0, 0.0, 1.0], device=gs.device)
+                aim = rung_pt + rt["up"] * up + rt["toward_robot"] * self.ladder_nrm[:, None, :]
+                dv = self.palms_pos - aim
+                d_hand = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2)  # [n, 2]
+                hq = self.robot.get_links_quat(self.hands_links_idx)
+                nz = transform_by_quat(torch.tensor([0.0, 0.0, -1.0], device=gs.device).expand(hq.shape[:-1] + (3,)), hq)[..., 2]
+                p_hand = (1.0 - d_hand / tc["reach_distance"]).clamp(0.0, 1.0) * (nz <= rt["max_palm_up_cos"]).to(gs.tc_float)
+                p_next = p_hand.max(dim=1).values
+            else:
+                dv = self.palms_pos - rung_pt
+                d = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2).min(dim=1).values  # 横棒の中心線までの距離（左右は無視）
+                p_next = (1.0 - d / tc["reach_distance"]).clamp(0.0, 1.0)
             new_target = (nxt != self.reach_next_rung) | fresh_hang
             self.reach_next_rung = nxt
             self.reach_next_best = torch.where(new_target, p_next, self.reach_next_best)
