@@ -7,7 +7,7 @@
     uv run python locomotion/g1_ladder_train.py --init-from g1-ladder:2999 -e g1-ladder-v2 --max-iterations 1000
                                                                          # 別の実験の学習済みモデルから、今の設定で学習する
 
-学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15。以前の版は g1-ladder, g1-ladder-v2〜v14）。
+学習結果は logs/<実験名>/ に保存される（既定の実験名は g1-ladder-v15b。以前の版は g1-ladder, g1-ladder-v2〜v15）。
 --resume を付けずに同じ実験名で実行すると、前回の logs/<実験名>/ は削除されて上書きされる点に注意。
 
 学習中に TensorBoard で見るとよい項目:
@@ -157,6 +157,10 @@ def get_cfgs():
             "damping": 110.0,  # [N·s/m]
             "max_force": 250.0,  # 握力の上限 [N]（片手。体重 32 kg の約 8 割）
             "slip_distance": 0.12,  # 手のひらが握った位置からこれ以上ずれたら、滑って外れたとみなす [m]
+            # ときどき片手を強制的に離す（v15b、学習中だけ）：手の番の間、両手で握り足が横棒に乗っているときに、平均 4 秒に
+            # 1 回、低い方の手を離させ、0.3 秒は握れなくする。v15 では両手の力の合計（約 380〜400 N）が体重（約 310 N）を
+            # 超えるほど腕でぶら下がっていて、片手を離すと残りの手が滑って約 0.5 秒で全員落ちた（手を移す動きが出ない原因）
+            "forced_release": {"rate_per_s": 0.25, "block_s": 0.3},
         },
         # リセット時のロボットの置き方
         "reset": {
@@ -257,6 +261,7 @@ def get_cfgs():
             "alive": 0.0,  # v1 の 0.5・v2〜v4 の 0.2 では、転ばずにじっとしているだけで得をしたので 0 に（v5）
             "body_contact": -5.0,  # 手足以外がはしごや床を押す力（体重比）。v1 では胸を緩やかなはしごにもたれかけて休んでいた（v2）
             "grip_strain": -0.5,  # 握力の限界に近い力で引きつけている（腕だけでぶら下がる動きを抑える）
+            "grip_load": -2.0,  # 足が横棒に乗っている間、両手で引きつけている力の合計（体重比）（v15b。足で体重を支えることを促す）
             "flight": -5.0,
             "lin_vel_z": -1.0,
             "yaw_rate": -0.3,
@@ -294,7 +299,7 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15b", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("-b", "--num-envs", type=int, default=4096, help="並列に動かす環境の数")
     parser.add_argument("--max-iterations", type=int, default=3000, help="学習のイテレーション数")
     parser.add_argument("--resume", type=int, default=None, help="このイテレーションのチェックポイントから学習を再開する")
