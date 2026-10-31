@@ -10,6 +10,7 @@
     uv run python locomotion/g1_ladder_eval.py --start hang --angle 90
                                                                    # はしごの高い段を両手で握ってぶら下がった姿勢から始める
     uv run python locomotion/g1_ladder_eval.py --start hang --hang-rung 6
+    uv run python locomotion/g1_ladder_eval.py --start mid --angle 85     # はしごの途中の姿勢（両足 2 段目・両手 4 段目）から（v15k 以降）
                                                                    # ぶら下がるときに握る段を指定する（0 が一番下。学習では 5〜7、v11a・v12 は 5〜10）
     uv run python locomotion/g1_ladder_eval.py --start stand --angle 90
                                                                    # 床に立ったまま、肩より少し上の段を両手で握った姿勢から始める
@@ -48,12 +49,12 @@ from g1_ladder_env import G1LadderEnv
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15j", help="実験名（logs/ の下のフォルダ名）")
+    parser.add_argument("-e", "--exp-name", type=str, default="g1-ladder-v15k", help="実験名（logs/ の下のフォルダ名）")
     parser.add_argument("--ckpt", type=int, default=None, help="読み込むチェックポイントのイテレーション（省略時は最新）")
     parser.add_argument("--angle", type=float, default=85.0, help="はしごの傾き（床からの角度）[deg]")
     parser.add_argument(
-        "--start", choices=["ground", "hang", "stand"], default="ground",
-        help="開始の仕方（ground：床から、hang：ぶら下がった姿勢から、stand：床に立って握った姿勢から）",
+        "--start", choices=["ground", "hang", "stand", "mid"], default="ground",
+        help="開始の仕方（ground：床から、hang：ぶら下がった姿勢から、stand：床に立って握った姿勢から、mid：はしごの途中の姿勢（両足 2 段目・両手 4 段目）から。mid は v15k 以降）",
     )
     parser.add_argument("--hang-rung", type=int, default=None, help="--start hang で握る段（0 が一番下。省略時は学習の設定の範囲からランダム）")
     parser.add_argument("--no-wait", action="store_true", help="Enter を待たずにすぐ始める")
