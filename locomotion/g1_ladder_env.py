@@ -566,7 +566,11 @@ class G1LadderEnv:
         # 差が hand_turn_max_gap 以下なら「手の番」（手を 1 段上げる）、それより大きければ「足の番」（足を 1 段上げる）。
         # 例：手 4 段目・足 床（差 4）→ 足の番 → 足 1 段目（差 3）→ 手の番 → 手 5 段目（差 4）→ 足の番 → ……
         turn_cfg = tc.get("turn_taking")
-        H_before = self.hands_best_rung.max(dim=1).values
+        # 手の段：どちらかの手が握った一番高い段（v15〜v15m）。v15n からは hand_level が "min" なら低い方の手の段
+        #   （右手が 5 段目・左手が 4 段目なら 4。両手をそろえてから足の番になる）
+        use_min = turn_cfg is not None and turn_cfg.get("hand_level", "max") == "min"
+        hand_level = (lambda x: x.min(dim=1).values) if use_min else (lambda x: x.max(dim=1).values)
+        H_before = hand_level(self.hands_best_rung)
         F_before = self.feet_best_rung.max(dim=1).values
         if turn_cfg is not None and turn_cfg.get("ignore_base_height", False):
             F_before = self.feet_seen_best.max(dim=1).values  # v15d：腰との高さを問わずに数えた足の段
@@ -714,7 +718,7 @@ class G1LadderEnv:
         if turn_cfg is not None:
             # v15：手の最高の段 H を上げるのは「手の番」のときだけ加点（足の番に上げても加点しない。減点もしない）。
             # もう一方の手を H まで追いつかせるのは、いつでも加点
-            H_now = torch.where(fresh_hang, self.grip_rung.max(dim=1).values, H_before)
+            H_now = torch.where(fresh_hang, hand_level(self.grip_rung), H_before)
             raise_H = hand_rung > H_now[:, None]
             rewarded_hand = hand_higher & ~(raise_H & ~self.hand_turn[:, None])
         hold_s = tc.get("hand_rung_hold_s")
@@ -738,7 +742,7 @@ class G1LadderEnv:
         # （1 − 距離 / reach_distance）の最高記録を更新した分。H が変わったら、そのときの度合いを基準に測り直す
         self.reach_next_gain = torch.zeros_like(self.reach_next_gain)
         if turn_cfg is not None:
-            H = self.hands_best_rung.max(dim=1).values
+            H = hand_level(self.hands_best_rung)
             nxt = (H + 1).clamp(max=self.num_rungs - 1)
             rung_pt = self.rung_s[nxt][:, None, None] * self.ladder_u[:, None, :]  # [n, 1, 3]
             rt = tc.get("hand_reach_target")
@@ -768,6 +772,9 @@ class G1LadderEnv:
                     above = (self.palms_pos[..., 2] > rung_top).to(gs.tc_float)
                     p2 = (1.0 - d2 / s2["distance"]).clamp(0.0, 1.0) * ok_dir * above
                     p_hand = 0.5 * p_hand + 0.5 * p2
+                if use_min:
+                    # v15n：すでに目標の段（以上）を握っている手は数えない（低い方の手を上の段へ運ぶ動きだけを測る）
+                    p_hand = p_hand * ~(self.grip & (self.grip_rung >= nxt[:, None]))
                 p_next = p_hand.max(dim=1).values
             else:
                 dv = self.palms_pos - rung_pt
