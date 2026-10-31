@@ -190,6 +190,14 @@ class G1LadderEnv:
         self.hands_best_rung = torch.full((n, 2), -1, dtype=gs.tc_int, device=gs.device)  # このエピソードで各手が握った最高の段（v7）
         self.new_hand_rungs = torch.zeros((n,), **f)  # 今のステップで、手が初めて握った（1 つ上の）段の数（v7）
         self.new_rungs = torch.zeros((n,), **f)  # 今のステップで、足が初めて乗った段の数（v5）
+        # 手と足の順番（v15）
+        self.hand_turn = torch.zeros((n,), **b)  # 今が「手の番」か（手と足の段の差が小さい）
+        self.out_of_turn = torch.zeros((n,), **f)  # 今のステップで、手の番なのに足の最高の段を上げた数
+        self.feet_turn_best = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # 足の番に上げた足の最高の段
+        self.body_best = torch.zeros((n,), **f)  # 到達度のうち重心・足の分の最高記録（手の番の間は増やさない）
+        self.reach_next_best = torch.zeros((n,), **f)  # 手の番の間、手が次の段に近づいた度合いの最高記録
+        self.reach_next_rung = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # その「次の段」
+        self.reach_next_gain = torch.zeros((n,), **f)
         self.episode_length_buf = torch.zeros((n,), dtype=gs.tc_int, device=gs.device)
 
         # はしごの状態（環境ごと）
@@ -500,6 +508,16 @@ class G1LadderEnv:
     def _update_task_state(self):
         tc = self.env_cfg["task"]
         h = self.target_height
+        # 手と足の順番（v15）：このステップの更新前の、手が握った最高の段 H と足が乗った最高の段 F（床は -1）の差で決める。
+        # 差が hand_turn_max_gap 以下なら「手の番」（手を 1 段上げる）、それより大きければ「足の番」（足を 1 段上げる）。
+        # 例：手 4 段目・足 床（差 4）→ 足の番 → 足 1 段目（差 3）→ 手の番 → 手 5 段目（差 4）→ 足の番 → ……
+        turn_cfg = tc.get("turn_taking")
+        H_before = self.hands_best_rung.max(dim=1).values
+        F_before = self.feet_best_rung.max(dim=1).values
+        if turn_cfg is not None:
+            self.hand_turn = (H_before - F_before) <= turn_cfg["hand_turn_max_gap"]
+        else:
+            self.hand_turn = torch.zeros_like(self.hand_turn)
 
         # 足が横棒に乗っているか（v6 で厳しくした）：足の裏が横棒の上面の高さにあり、横棒の上に足が掛かっていて、
         # 力がかかっている。v5 までは「横棒の近くで何かに触れている」だけで数えていたため、足を高く蹴り上げて
@@ -547,6 +565,13 @@ class G1LadderEnv:
             self.progress = self.progress + w[4] * p_lift
         # ぶら下がった姿勢から始めたエピソードは、始めた時点の到達度を基準にする（何もせずに報酬が出ないように）
         fresh_hang = self.is_hang & (self.episode_length_buf <= 1)
+        if turn_cfg is not None:
+            # v15：到達度のうち重心・足の分（重心の高さ・足の段の高さ・足を持ち上げた高さ）は「足の番」の間だけ増やせる。
+            # 手の番の間は、それまでの最高記録で頭打ちにする（手を握り直さずに足だけで登っても到達度が上がらない）
+            body = w[2] * p_com + w[3] * p_feet + (w[4] * p_lift if len(w) >= 5 else 0.0)
+            self.body_best = torch.where(fresh_hang, body, self.body_best)
+            self.body_best = torch.where(self.hand_turn, self.body_best, torch.maximum(self.body_best, body))
+            self.progress = self.progress - body + torch.minimum(body, self.body_best)
         self.best_progress = torch.where(fresh_hang, self.progress, self.best_progress)
         self.progress_gain = (self.progress - self.best_progress).clamp(min=0.0)
         self.best_progress = torch.maximum(self.best_progress, self.progress)
@@ -566,8 +591,20 @@ class G1LadderEnv:
             rung_z = self.rung_s[self.feet_rung_idx.clamp(min=0)] * torch.sin(self.ladder_angle)[:, None]
             held &= rung_z < self.base_pos[:, 2:3] - below
         held_rung = torch.where(held, self.feet_rung_idx, torch.full_like(self.feet_rung_idx, -1))
-        higher = (held_rung > self.feet_best_rung).to(gs.tc_float)
-        self.new_rungs = higher.sum(dim=1)
+        higher = held_rung > self.feet_best_rung
+        if turn_cfg is not None:
+            # v15：足が、足の番に上げた最高の段（feet_turn_best）より上の段に乗ったら、足の番なら加点（記録を更新）、
+            # 手の番なら減点。もう一方の足をその段まで追いつかせるのは、いつでも加点。
+            # （手の番に片足で上げた段は記録に入れないので、もう一方の足を追いつかせても加点されない）
+            self.feet_turn_best = torch.where(fresh_hang, self.feet_best_rung.max(dim=1).values, self.feet_turn_best)
+            beyond = held_rung > self.feet_turn_best[:, None]
+            foot_turn = ~self.hand_turn[:, None]
+            self.out_of_turn = (higher & beyond & ~foot_turn).to(gs.tc_float).sum(dim=1)
+            higher = higher & (~beyond | foot_turn)
+            self.feet_turn_best = torch.maximum(
+                self.feet_turn_best, torch.where(higher & beyond, held_rung, torch.full_like(held_rung, -1)).max(dim=1).values
+            )
+        self.new_rungs = higher.to(gs.tc_float).sum(dim=1)
         self.feet_best_rung = torch.maximum(self.feet_best_rung, held_rung)
 
         # 手の段ごとの報酬（v7）：片手がこのエピソードで初めて 1 つ上の段を握ったとき。もう一方の手が握っているか、
@@ -578,11 +615,35 @@ class G1LadderEnv:
         other_grip = self.grip.flip(dims=[1])
         supported_hand = other_grip | self.feet_on_rung.all(dim=1, keepdim=True)
         hand_higher = (hand_rung > self.hands_best_rung) & supported_hand
-        self.new_hand_rungs = hand_higher.to(gs.tc_float).sum(dim=1)
+        rewarded_hand = hand_higher
+        if turn_cfg is not None:
+            # v15：手の最高の段 H を上げるのは「手の番」のときだけ加点（足の番に上げても加点しない。減点もしない）。
+            # もう一方の手を H まで追いつかせるのは、いつでも加点
+            H_now = torch.where(fresh_hang, self.grip_rung.max(dim=1).values, H_before)
+            raise_H = hand_rung > H_now[:, None]
+            rewarded_hand = hand_higher & ~(raise_H & ~self.hand_turn[:, None])
+        self.new_hand_rungs = rewarded_hand.to(gs.tc_float).sum(dim=1)
         self.hands_best_rung = torch.where(hand_higher, hand_rung, self.hands_best_rung)
 
+        # 手を次の段へ移す途中の報酬（v15）：「手の番」の間、どちらかの手のひらが「今の H の 1 つ上の段」に近づいた度合い
+        # （1 − 距離 / reach_distance）の最高記録を更新した分。H が変わったら、そのときの度合いを基準に測り直す
+        self.reach_next_gain = torch.zeros_like(self.reach_next_gain)
+        if turn_cfg is not None:
+            H = self.hands_best_rung.max(dim=1).values
+            nxt = (H + 1).clamp(max=self.num_rungs - 1)
+            rung_pt = self.rung_s[nxt][:, None, None] * self.ladder_u[:, None, :]  # [n, 1, 3]
+            dv = self.palms_pos - rung_pt
+            d = torch.sqrt(dv[..., 0] ** 2 + dv[..., 2] ** 2).min(dim=1).values  # 横棒の中心線までの距離（左右は無視）
+            p_next = (1.0 - d / tc["reach_distance"]).clamp(0.0, 1.0)
+            new_target = (nxt != self.reach_next_rung) | fresh_hang
+            self.reach_next_rung = nxt
+            self.reach_next_best = torch.where(new_target, p_next, self.reach_next_best)
+            active = self.hand_turn & (H >= 0) & (H + 1 < self.num_rungs) & supported
+            self.reach_next_gain = torch.where(active, (p_next - self.reach_next_best).clamp(min=0.0), 0.0)
+            self.reach_next_best = torch.where(active, torch.maximum(self.reach_next_best, p_next), self.reach_next_best)
+
         # じっとしたら打ち切り（v5）：到達度の最高記録も足の段も stall_time_s 秒更新されず、目標の段にもいない
-        improved = (self.progress_gain > 1e-4) | (self.new_rungs > 0)
+        improved = (self.progress_gain > 1e-4) | (self.new_rungs > 0) | (self.reach_next_gain > 1e-4) | (self.new_hand_rungs > 0)
         self.stall_steps = torch.where(improved, torch.zeros_like(self.stall_steps), self.stall_steps + 1)
         stall_limit = tc.get("stall_time_s")
         self.stalled = torch.zeros_like(self.stalled)
@@ -777,6 +838,11 @@ class G1LadderEnv:
         ep_target = torch.where(self.is_hang, torch.full_like(self.target_rung_env, k_max), self.target_rung_env)
         if self.fixed_angle is not None:
             ep_target = torch.full_like(self.target_rung_env, k_max)
+        if use_hang and self.hang_cfg.get("target_offset") is not None:
+            # v15：ぶら下がり開始の目標は「握った段 + target_offset」（-1 ならすぐ下の段）。手を動かさずに足を下ろすだけでは
+            # 届かない段にして、手を上の段へ握り直す練習をさせる（v14 までは上限の段が目標で、足を下ろすだけで成功できた）
+            hang_target = (m + self.hang_cfg["target_offset"]).clamp(0, self.num_rungs - 1)
+            ep_target = torch.where(hang, hang_target, ep_target)
         self.episode_target = torch.where(mask, ep_target, self.episode_target)
         self.target_height = self.rung_s[self.episode_target] * torch.sin(self.ladder_angle)
         qpos = torch.where(mask[:, None], qpos, self.robot.get_qpos())
@@ -829,6 +895,11 @@ class G1LadderEnv:
         self.feet_prev_rung.masked_fill_(m1, -1)
         self.hands_best_rung.masked_fill_(m1, -1)
         self.new_hand_rungs.masked_fill_(mask, 0.0)
+        for buf in (self.out_of_turn, self.body_best, self.reach_next_best, self.reach_next_gain):
+            buf.masked_fill_(mask, 0.0)
+        self.reach_next_rung.masked_fill_(mask, -1)
+        self.feet_turn_best.masked_fill_(mask, -1)
+        self.hand_turn.masked_fill_(mask, False)
         self.flight_steps.masked_fill_(mask, 0)
         self.reset_buf.masked_fill_(mask, True)
 
@@ -857,6 +928,14 @@ class G1LadderEnv:
     def _reward_new_rung(self):
         # 足がこのエピソードで初めて 1 つ上の段に乗ったとき（段ごと・足ごと。v5）
         return self.new_rungs
+
+    def _reward_out_of_turn(self):
+        # 手の番なのに、足の最高の段を上げた（v15）
+        return self.out_of_turn
+
+    def _reward_hand_reach(self):
+        # 手の番の間、手のひらが次の段に近づいた度合いの最高記録の更新量（v15）
+        return self.reach_next_gain
 
     def _reward_first_grip(self):
         # 高い段の横棒を初めて握ったとき（片手ごとに一度だけ）
