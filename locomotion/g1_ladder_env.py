@@ -253,6 +253,7 @@ class G1LadderEnv:
         self.angle_override = torch.full((n,), float("nan"), **f)
         self.is_review = torch.zeros((n,), **b)
         self.is_hang = torch.zeros((n,), **b)  # はしごにぶら下がった姿勢から始めたエピソードか（v3）
+        self.is_mid = torch.zeros((n,), **b)  # はしごの途中の姿勢から始めたか（v15k）
         self.is_hang_only = torch.zeros((n,), **b)  # そのうち、床に立って握った姿勢ではなく、ぶら下がった姿勢から始めたか（v15c）
         self.common_step_counter = 0
         self.assist_scale = cc["assist_init"]
@@ -620,6 +621,13 @@ class G1LadderEnv:
             self.progress = self.progress + w[4] * p_lift
         # ぶら下がった姿勢から始めたエピソードは、始めた時点の到達度を基準にする（何もせずに報酬が出ないように）
         fresh_hang = self.is_hang & (self.episode_length_buf <= 1)
+        # はしごの途中の姿勢から始めた直後は、足がまだ横棒に触れていなくても、足は foot_rung に乗っているとみなす（v15k）
+        #   （85°・90° では始めた直後のステップで足がまだ横棒に接していないことがあり、そのまま「床から 2 段目へ段を飛ばした」
+        #   順番違反として打ち切られていた）
+        feet_init = self.feet_rung_idx
+        if getattr(self, "mid_cfg", None):
+            fresh_mid = self.is_mid & (self.episode_length_buf <= 1)
+            feet_init = torch.where(fresh_mid[:, None], torch.full_like(self.feet_rung_idx, self.mid_cfg["foot_rung"]), self.feet_rung_idx)
         if turn_cfg is not None:
             # v15：到達度のうち重心・足の分（重心の高さ・足の段の高さ・足を持ち上げた高さ）は「足の番」の間だけ増やせる。
             # 手の番の間は、それまでの最高記録で頭打ちにする（手を握り直さずに足だけで登っても到達度が上がらない）
@@ -633,7 +641,7 @@ class G1LadderEnv:
 
         # 段ごとの報酬（v5）：足がこのエピソードで初めて 1 つ上の段に乗るたびに数える（最高記録の更新だけ）
         # 途中の姿勢から始めた直後は、そのときの段を基準にする
-        self.feet_best_rung = torch.where(fresh_hang[:, None], self.feet_rung_idx, self.feet_best_rung)
+        self.feet_best_rung = torch.where(fresh_hang[:, None], feet_init, self.feet_best_rung)
         # v6：同じ段に foot_hold_time_s 秒以上乗り続けてから数える（足を蹴り上げて一瞬だけ高い段に掛ける動きを数えない）。
         # 1 回の更新で数えるのは 1 段まで（床から一気に高い段に足を掛けても 1 段分）
         same = (self.feet_rung_idx == self.feet_prev_rung) & (self.feet_rung_idx >= 0)
@@ -652,8 +660,8 @@ class G1LadderEnv:
             # v15d：手と足の番・順番違反の判定では、足の段を「同じ段に 0.2 秒以上乗った」だけで数える（腰より 0.35 m 以上低い、
             #   という v7 の条件を使わない）。v15c では、しゃがんで（腰との高さの条件を満たさない形で）3 段目に立つと、加点も
             #   減点もされなかったので、手の番のまま足を上げていた。足の段の加点（+3）は、これまでどおり v7 の条件付き
-            self.feet_seen_best = torch.where(fresh_hang[:, None], self.feet_rung_idx, self.feet_seen_best)
-            self.feet_turn_best = torch.where(fresh_hang, self.feet_rung_idx.max(dim=1).values, self.feet_turn_best)
+            self.feet_seen_best = torch.where(fresh_hang[:, None], feet_init, self.feet_seen_best)
+            self.feet_turn_best = torch.where(fresh_hang, feet_init.max(dim=1).values, self.feet_turn_best)
             new_seen = held_any_height > self.feet_seen_best  # この足が初めて乗った段（腰との高さは問わない）
             beyond = held_any_height > self.feet_turn_best[:, None]  # 足の番に上げた最高の段より上
             # 足の番に上げてよいのは 1 段だけ。ぶら下がった姿勢から始めて、足がまだどの段にも乗っていないときは、どの段でもよい
@@ -979,13 +987,16 @@ class G1LadderEnv:
                 lv_idx = self.levels.clamp(0, self.num_levels - 1)
             mid_q = self.mid_qpos_table[lv_idx]
             qpos = torch.where(mid[:, None], mid_q, qpos)
-            # 握った位置：逆運動学で手のひらを置いた位置（横棒の中心から、ロボット側へ 4 cm・左右 ±0.17 m）
+            # 握った位置：逆運動学で手のひらを置いた位置（横棒の中心から上へ hand_up [m]・ロボット側へ hand_toward [m]・左右 ±0.17 m）
             hk = mc["hand_rung"]
-            mid_anchor = (self.rung_s[hk] * self.ladder_u + 0.04 * self.ladder_nrm)[:, None, :].repeat(1, 2, 1)
+            up_v = torch.tensor([0.0, 0.0, 1.0], device=gs.device)
+            mid_anchor = (self.rung_s[hk] * self.ladder_u + mc.get("hand_up", 0.0) * up_v
+                          + mc.get("hand_toward", 0.0) * self.ladder_nrm)[:, None, :].repeat(1, 2, 1)
             mid_anchor[:, 0, 1] = 0.17
             mid_anchor[:, 1, 1] = -0.17
         self.is_hang = torch.where(mask, hang | stand | mid, self.is_hang)
         self.is_hang_only = torch.where(mask, hang, self.is_hang_only)
+        self.is_mid = torch.where(mask, mid, self.is_mid)
         # 今のエピソードの目標の段：床からの開始は環境ごとの目標の段、ぶら下がり・床に立って握った姿勢からの開始と
         # 評価のときは一番上の目標（task.target_rung）
         k_max = self.env_cfg["task"]["target_rung"]
