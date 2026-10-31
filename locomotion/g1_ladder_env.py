@@ -194,6 +194,8 @@ class G1LadderEnv:
         self.hand_turn = torch.zeros((n,), **b)  # 今が「手の番」か（手と足の段の差が小さい）
         self.out_of_turn = torch.zeros((n,), **f)  # 今のステップで、手の番なのに足の最高の段を上げた数
         self.feet_turn_best = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # 足の番に上げた足の最高の段
+        self.release_block = torch.zeros((n, 2), dtype=gs.tc_int, device=gs.device)  # 強制的に離した手が握れない残りステップ数（v15b）
+        self.forced_releases = torch.zeros((n,), **f)  # 今のステップで強制的に離した手の数（v15b。記録用）
         self.body_best = torch.zeros((n,), **f)  # 到達度のうち重心・足の分の最高記録（手の番の間は増やさない）
         self.reach_next_best = torch.zeros((n,), **f)  # 手の番の間、手が次の段に近づいた度合いの最高記録
         self.reach_next_rung = torch.full((n,), -1, dtype=gs.tc_int, device=gs.device)  # その「次の段」
@@ -481,6 +483,9 @@ class G1LadderEnv:
             hand_quat = self.robot.get_links_quat(self.hands_links_idx)
             palm_normal = transform_by_quat(torch.tensor([0.0, 0.0, -1.0], device=gs.device).expand(hand_quat.shape[:-1] + (3,)), hand_quat)
             within &= -palm_normal[..., 2] > palm_down
+        # v15b：強制的に離した手は、しばらく握れない（すぐ同じ段を握り直して、片手で支える練習を避けないように）
+        within &= self.release_block == 0
+        self.release_block = (self.release_block - 1).clamp(min=0)
         new_grip = command & within & ~self.grip
         # 握った位置：その瞬間の手のひらの位置（横棒にめり込まないよう、今の位置のまま保つ）
         self.grip_anchor = torch.where(new_grip[..., None], self.palms_pos, self.grip_anchor)
@@ -499,6 +504,22 @@ class G1LadderEnv:
             to_held = transform_by_quat(held_pt - self.palms_pos, inv_quat(hand_quat))
             held_facing = -to_held[..., 2] / torch.norm(to_held, dim=-1).clamp(min=1e-6)
             self.grip = self.grip & (held_facing > release_cos)
+        # v15b：ときどき片手を強制的に離す（学習中だけ）。手の番の間、両手で握り足が横棒に乗っているときに、平均
+        #   1 / rate_per_s 秒に 1 回、低い方の手（同じ段ならランダム）を離させ、block_s 秒は握れなくする。
+        #   片手でも落ちない姿勢と、離れた手で次の段へ手を伸ばす経験を増やす（v15 では両手の力の合計が体重を超えるほど
+        #   腕でぶら下がっていて、片手を離すと残りの手が滑って約 0.5 秒で全員落ちた）
+        self.forced_releases = torch.zeros_like(self.forced_releases)
+        fr = gc.get("forced_release")
+        if fr is not None and self.fixed_angle is None:
+            ready = self.hand_turn & self.grip.all(dim=1) & self.feet_on_rung.any(dim=1)
+            fire = ready & (torch.rand((self.num_envs,), device=gs.device) < fr["rate_per_s"] * self.dt)
+            lower_left = (self.grip_rung[:, 0] < self.grip_rung[:, 1]) | (
+                (self.grip_rung[:, 0] == self.grip_rung[:, 1]) & (torch.rand((self.num_envs,), device=gs.device) < 0.5)
+            )
+            which = torch.stack((lower_left, ~lower_left), dim=1) & fire[:, None]
+            self.grip = self.grip & ~which
+            self.release_block = torch.where(which, int(round(fr["block_s"] / self.dt)), self.release_block)
+            self.forced_releases = which.to(gs.tc_float).sum(dim=1)
         # 高い段を初めて握ったか（腕を使うことを促す一度きりの報酬に使う）
         high = self.grip_anchor[:, :, 2] > self.env_cfg["task"]["first_grip_min_height"]
         grip_high = self.grip & high
@@ -899,6 +920,8 @@ class G1LadderEnv:
             buf.masked_fill_(mask, 0.0)
         self.reach_next_rung.masked_fill_(mask, -1)
         self.feet_turn_best.masked_fill_(mask, -1)
+        self.release_block.masked_fill_(m1, 0)
+        self.forced_releases.masked_fill_(mask, 0.0)
         self.hand_turn.masked_fill_(mask, False)
         self.flight_steps.masked_fill_(mask, 0)
         self.reset_buf.masked_fill_(mask, True)
@@ -963,6 +986,13 @@ class G1LadderEnv:
     def _reward_grip_strain(self):
         # 握力の限界に近い力で手を引きつけている（腕でぶら下がるより、足で体重を支えることを促す）
         return (torch.norm(self.grip_force, dim=-1) / self.env_cfg["grip"]["max_force"]).square().sum(dim=1)
+
+    def _reward_grip_load(self):
+        # 足が横棒に乗っている間、両手で引きつけている力の合計（体重比）（v15b。足で体重を支えることを促す）
+        # 片足でも乗っていれば数える（両足のときだけにすると、片足を浮かせてこの減点と強制的に手を離す練習を避けられる）
+        weight = float(self.link_masses.sum()) * 9.81
+        load = torch.norm(self.grip_force, dim=-1).sum(dim=1) / weight
+        return load * self.feet_on_rung.any(dim=1).to(gs.tc_float)
 
     # --- 動きの質（dense） ---
     def _reward_flight(self):
